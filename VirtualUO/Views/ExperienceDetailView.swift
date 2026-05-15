@@ -3,6 +3,14 @@ import SwiftUI
 struct ExperienceDetailView: View {
     let experience: Experience
 
+    // 1. Extragem calculul într-o variabilă separată
+    var totalTasks: Int {
+        let locCount = experience.localizations?.count ?? 0
+        let idCount = experience.identifications?.count ?? 0
+        let quizCount = experience.quizzes?.count ?? 0
+        return locCount + idCount + quizCount
+    }
+
     var body: some View {
         ZStack {
             Color(red: 0.02, green: 0.03, blue: 0.06).ignoresSafeArea()
@@ -22,7 +30,9 @@ struct ExperienceDetailView: View {
                     InfoRow(label: "GLB", value: experience.model_url != nil ? "Da" : "Nu")
                     InfoRow(label: "USDZ", value: experience.model_url_ios != nil ? "Da" : "Nu")
                     InfoRow(label: "Adnotari", value: "\(experience.annotations?.count ?? 0)")
-                    InfoRow(label: "Tasks", value: "\((experience.localizations?.count ?? 0) + (experience.identifications?.count ?? 0) + (experience.quizzes?.count ?? 0))")
+                    
+                    // 2. Folosim direct variabila calculată aici, mult mai simplu
+                    InfoRow(label: "Tasks", value: "\(totalTasks)") 
                 }
                 .padding(20)
                 .background(Color.white.opacity(0.05))
