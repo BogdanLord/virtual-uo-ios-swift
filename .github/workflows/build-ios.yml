@@ -1,0 +1,78 @@
+name: Build iOS IPA (Swift Native)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Verificare versiune
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Instalare XcodeGen
+        run: brew install xcodegen
+
+      - name: Generare proiect Xcode din project.yml
+        run: |
+          xcodegen generate
+          ls -la VirtualUO.xcodeproj/
+
+      - name: Build IPA Nesemnat
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project VirtualUO.xcodeproj \
+            -scheme VirtualUO \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE="" \
+            archive -archivePath build/app.xcarchive \
+            2>&1 | tee xcodebuild.log | \
+            grep -E "(error:|warning:|Build succeeded|FAILED|\\*\\* )" || true
+
+          if ! [ -d "build/app.xcarchive" ]; then
+            echo ""
+            echo "═══════════════════════════════════════"
+            echo "BUILD FAILED — erori:"
+            echo "═══════════════════════════════════════"
+            grep "error:" xcodebuild.log | head -40
+            exit 65
+          fi
+
+          mkdir -p build/Payload
+          cp -R build/app.xcarchive/Products/Applications/*.app build/Payload/
+          cd build && zip -r app.ipa Payload/
+          echo "✅ IPA: $(du -sh app.ipa | cut -f1)"
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+
+      - name: Upload IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VirtualUO-iOS-Swift
+          path: build/app.ipa
+          retention-days: 7
