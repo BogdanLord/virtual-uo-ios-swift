@@ -44,20 +44,16 @@ class SupabaseService {
     }
 
     // Parser manual care suporta annotations ca string sau array si afiseaza erorile in consola
+    // Parser manual care suporta annotations ca string sau array si afiseaza erorile in consola
     private func parseExperiencesManually(data: Data) throws -> [Experience] {
         guard let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw SupabaseError.parseError
         }
 
         return arr.compactMap { dict in
-            // Extragem ID-ul cu fallback pentru String
-            var id: Int? = dict["id"] as? Int
-            if id == nil, let idString = dict["id"] as? String {
-                id = Int(idString) // Daca Supabase trimite bigint ca String
-            }
-            
-            guard let finalId = id else {
-                print("🔴 DROP [ID]: id-ul lipseste sau nu poate fi convertit in Int! Valoarea primita: \(String(describing: dict["id"]))")
+            // Acum citim ID-ul direct ca String
+            guard let finalId = dict["id"] as? String else {
+                print("🔴 DROP [ID]: id-ul lipseste sau nu este String! Valoarea primita: \(String(describing: dict["id"]))")
                 return nil
             }
 

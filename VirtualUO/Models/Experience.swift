@@ -1,7 +1,7 @@
 import Foundation
 
 struct Experience: Identifiable, Codable {
-    let id: Int
+    let id: String // <-- Modificat aici din Int in String
     let title: String
     let model_url: String?
     let model_url_ios: String?
