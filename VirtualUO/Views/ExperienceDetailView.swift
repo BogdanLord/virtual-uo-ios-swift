@@ -1,4 +1,3 @@
-@'
 import SwiftUI
 
 struct ExperienceDetailView: View {
@@ -57,4 +56,3 @@ struct InfoRow: View {
         }
     }
 }
-'@ | Out-File -Encoding utf8 VirtualUO\Views\ExperienceDetailView.swift

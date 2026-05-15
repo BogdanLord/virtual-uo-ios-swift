@@ -1,4 +1,3 @@
-@'
 import SwiftUI
 
 struct ExperienceListView: View {
@@ -181,4 +180,3 @@ extension Experience: Hashable {
     static func == (lhs: Experience, rhs: Experience) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
-'@ | Out-File -Encoding utf8 VirtualUO\Views\ExperienceListView.swift

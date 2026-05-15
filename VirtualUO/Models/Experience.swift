@@ -1,4 +1,3 @@
-@'
 import Foundation
 
 struct Experience: Identifiable, Codable {
@@ -51,4 +50,3 @@ struct QuizAnswer: Codable {
     let text: String
     let isCorrect: Bool
 }
-'@ | Out-File -Encoding utf8 VirtualUO\Models\Experience.swift
