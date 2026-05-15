@@ -4,7 +4,7 @@
 class SupabaseService {
     static let shared = SupabaseService()
 
-    // ⚠️ INLOCUIESTE cu valorile tale din src/utils/supabaseClient.ts:
+    // ⚠️ INLOCUIESTE cu valorile tale din src/utils/supabaseClient.ts daca e cazul:
     private let supabaseURL  = "https://sqagdoaovomslcgrtwun.supabase.co"
     private let supabaseKey  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNxYWdkb2Fvdm9tc2xjZ3J0d3VuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg3MzYwNzUsImV4cCI6MjA4NDMxMjA3NX0.ghSvfDbirwpoXBhZ5deRrt4fieazbztqF0hc0vzGPhQ"
 
@@ -38,24 +38,36 @@ class SupabaseService {
             return try decoder.decode([Experience].self, from: data)
         } catch {
             // Daca decoding-ul integral pica, incercam sa parsam manual
-            // (cazul cand annotations vine ca string in loc de array)
-            print("Decode error, retry manual: \(error)")
+            print("🔴 Decode error principal, se incearca parsarea manuala: \(error)")
             return try parseExperiencesManually(data: data)
         }
     }
 
-    // Parser manual care suporta annotations ca string sau array
+    // Parser manual care suporta annotations ca string sau array si afiseaza erorile in consola
     private func parseExperiencesManually(data: Data) throws -> [Experience] {
         guard let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw SupabaseError.parseError
         }
 
         return arr.compactMap { dict in
-            guard let id = dict["id"] as? Int,
-                  let title = dict["title"] as? String else { return nil }
+            // Extragem ID-ul cu fallback pentru String
+            var id: Int? = dict["id"] as? Int
+            if id == nil, let idString = dict["id"] as? String {
+                id = Int(idString) // Daca Supabase trimite bigint ca String
+            }
+            
+            guard let finalId = id else {
+                print("🔴 DROP [ID]: id-ul lipseste sau nu poate fi convertit in Int! Valoarea primita: \(String(describing: dict["id"]))")
+                return nil
+            }
+
+            guard let title = dict["title"] as? String else {
+                print("🔴 DROP [TITLE]: title lipseste sau nu este String! Valoarea primita: \(String(describing: dict["title"]))")
+                return nil
+            }
 
             return Experience(
-                id: id,
+                id: finalId,
                 title: title,
                 model_url: dict["model_url"] as? String,
                 model_url_ios: dict["model_url_ios"] as? String,
@@ -92,9 +104,9 @@ enum SupabaseError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "URL invalid"
-        case .noResponse: return "Niciun raspuns"
+        case .noResponse: return "Niciun raspuns primit"
         case .httpError(let code, let body): return "HTTP \(code): \(body.prefix(200))"
-        case .parseError: return "Eroare parsare JSON"
+        case .parseError: return "Eroare la parsarea JSON-ului"
         }
     }
 }
