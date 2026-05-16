@@ -1,28 +1,26 @@
 ﻿import SwiftUI
 import RealityKit
 import ARKit
-import Combine
+import GLTFKit2
 
 struct ARExperienceView: View {
     let experience: Experience
     @Environment(\.dismiss) private var dismiss
 
-    @State private var arStatus = "Initializare AR..."
     @State private var stage: ARStage = .scanning
-    @State private var downloadProgress = ""
+    @State private var statusDetail = ""
     @State private var errorText: String?
 
     enum ARStage {
-        case scanning, readyToPlace, placed, downloading, failed
+        case scanning, readyToPlace, downloading, placed, failed
     }
 
     var body: some View {
         ZStack {
             ARViewContainer(
                 experience: experience,
-                arStatus: $arStatus,
                 stage: $stage,
-                downloadProgress: $downloadProgress,
+                statusDetail: $statusDetail,
                 errorText: $errorText
             )
             .ignoresSafeArea()
@@ -33,7 +31,10 @@ struct ARExperienceView: View {
         .statusBarHidden(true)
         .onAppear {
             AppDelegate.orientationLock = .landscape
-            UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
+            UIDevice.current.setValue(
+                UIInterfaceOrientation.landscapeRight.rawValue,
+                forKey: "orientation"
+            )
         }
         .onDisappear {
             AppDelegate.orientationLock = .all
@@ -50,42 +51,49 @@ struct ARExperienceView: View {
 
     private var topBar: some View {
         HStack {
-            Button {
-                dismiss()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark")
-                    Text("Inchide")
-                }
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(Color.red.opacity(0.85))
-                .clipShape(Capsule())
-            }
-
+            closeButton
             Spacer()
-
-            Text(experience.title)
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
+            titleBadge
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
     }
 
+    private var closeButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "xmark")
+                Text("Inchide")
+            }
+            .font(.system(size: 14, weight: .bold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.red.opacity(0.85))
+            .clipShape(Capsule())
+        }
+    }
+
+    private var titleBadge: some View {
+        Text(experience.title)
+            .font(.system(size: 14, weight: .bold))
+            .foregroundColor(.white)
+            .lineLimit(1)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule())
+    }
+
     private var bottomStatus: some View {
-        VStack(spacing: 8) {
+        Group {
             if let err = errorText {
                 Text("Eroare: \(err)")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 10)
                     .background(Color.red.opacity(0.85))
@@ -107,8 +115,8 @@ struct ARExperienceView: View {
         switch stage {
         case .scanning: return "Misca telefonul ca sa scanezi podeaua"
         case .readyToPlace: return "Atinge ecranul ca sa plasezi modelul"
-        case .downloading: return "Se descarca modelul... \(downloadProgress)"
-        case .placed: return "Model plasat! Apropie-te si exploreaza"
+        case .downloading: return "Se incarca modelul... \(statusDetail)"
+        case .placed: return "Model plasat! Exploreaza-l"
         case .failed: return "A aparut o problema"
         }
     }
@@ -117,9 +125,8 @@ struct ARExperienceView: View {
 // MARK: - ARView Container
 struct ARViewContainer: UIViewRepresentable {
     let experience: Experience
-    @Binding var arStatus: String
     @Binding var stage: ARExperienceView.ARStage
-    @Binding var downloadProgress: String
+    @Binding var statusDetail: String
     @Binding var errorText: String?
 
     func makeUIView(context: Context) -> ARView {
@@ -133,7 +140,6 @@ struct ARViewContainer: UIViewRepresentable {
         arView.session.delegate = context.coordinator
         context.coordinator.arView = arView
 
-        // Gesture pentru tap (plasare model)
         let tap = UITapGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handleTap(_:))
@@ -155,16 +161,14 @@ struct ARViewContainer: UIViewRepresentable {
         weak var arView: ARView?
         var hasFoundPlane = false
         var modelPlaced = false
-        var modelEntity: ModelEntity?
 
         init(_ parent: ARViewContainer) {
             self.parent = parent
         }
 
-        // Cand ARKit gaseste un plan orizontal
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-            for anchor in anchors {
-                if anchor is ARPlaneAnchor, !hasFoundPlane {
+            for anchor in anchors where anchor is ARPlaneAnchor {
+                if !hasFoundPlane {
                     hasFoundPlane = true
                     DispatchQueue.main.async {
                         self.parent.stage = .readyToPlace
@@ -180,31 +184,20 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
 
-        // TAP pe ecran → plasare model
         @objc func handleTap(_ sender: UITapGestureRecognizer) {
-            guard let arView = arView else { return }
-            guard !modelPlaced else { return }
-            guard parent.stage == .readyToPlace else { return }
+            guard let arView = arView, !modelPlaced,
+                  parent.stage == .readyToPlace else { return }
 
             let tapLocation = sender.location(in: arView)
-
-            // Raycast: gasim unde lovim podeaua in lumea reala
             let results = arView.raycast(
                 from: tapLocation,
                 allowing: .estimatedPlane,
                 alignment: .horizontal
             )
 
-            guard let firstResult = results.first else {
-                DispatchQueue.main.async {
-                    self.parent.arStatus = "Indreapta camera spre podea"
-                }
-                return
-            }
+            guard let firstResult = results.first else { return }
 
             modelPlaced = true
-
-            // Cream anchor in punctul lovit
             let anchor = AnchorEntity(world: firstResult.worldTransform)
             arView.scene.addAnchor(anchor)
 
@@ -212,49 +205,59 @@ struct ARViewContainer: UIViewRepresentable {
                 self.parent.stage = .downloading
             }
 
-            // Descarcam si plasam modelul
             Task {
-                await self.loadAndPlaceModel(anchor: anchor)
+                await self.loadGLBModel(anchor: anchor)
             }
         }
 
-        // Descarca USDZ si il pune in scena
+        // Incarca GLB cu GLTFKit2 si il plaseaza
         @MainActor
-        func loadAndPlaceModel(anchor: AnchorEntity) async {
-            guard let modelURLString = parent.experience.model_url_ios else {
-                parent.errorText = "Nu exista model USDZ pentru aceasta experienta"
+        func loadGLBModel(anchor: AnchorEntity) async {
+            // Folosim GLB (model_url) - GLTFKit2 il citeste direct
+            guard let glbURLString = parent.experience.model_url,
+                  let glbURL = URL(string: glbURLString) else {
+                parent.errorText = "Nu exista model GLB"
                 parent.stage = .failed
                 return
             }
 
             do {
-                // Descarcam fisierul
-                let localURL = try await ARModelDownloader.shared.downloadModel(from: modelURLString)
+                parent.statusDetail = "descarcare..."
 
-                parent.downloadProgress = "Se proceseaza..."
+                // Descarcam GLB-ul local
+                let localURL = try await ARModelDownloader.shared.downloadModel(from: glbURLString)
 
-                // Incarcam modelul in RealityKit
-                let entity = try await ModelEntity(contentsOf: localURL)
+                parent.statusDetail = "procesare GLB..."
 
-                // Scalam modelul sa aiba ~30cm
-                let bounds = entity.visualBounds(relativeTo: nil)
-                let size = bounds.extents
-                let maxDim = max(size.x, max(size.y, size.z))
-                let targetSize: Float = 0.3
-                if maxDim > 0 {
-                    let scale = targetSize / maxDim
-                    entity.scale = SIMD3<Float>(repeating: scale)
+                // GLTFKit2 incarca GLB-ul
+                let asset = try await GLTFAsset(url: localURL)
+
+                parent.statusDetail = "construire scena..."
+
+                // Convertim in SceneKit node, apoi in RealityKit
+                let sceneSource = GLTFSCNSceneSource(asset: asset)
+                guard let scnScene = sceneSource.defaultScene else {
+                    parent.errorText = "Scena GLB goala"
+                    parent.stage = .failed
+                    return
                 }
 
-                // Activam interactiunile (mutare, rotire, scalare cu degetele)
-                entity.generateCollisionShapes(recursive: true)
+                // Convertim SCNNode → ModelEntity prin generare mesh
+                let modelEntity = try await convertToRealityKit(scnScene: scnScene)
 
-                anchor.addChild(entity)
-                self.modelEntity = entity
+                // Scalam la ~30cm
+                let bounds = modelEntity.visualBounds(relativeTo: nil)
+                let maxDim = max(bounds.extents.x, max(bounds.extents.y, bounds.extents.z))
+                if maxDim > 0 {
+                    let scale = Float(0.3) / maxDim
+                    modelEntity.scale = SIMD3<Float>(repeating: scale)
+                }
 
-                // Activam gesturile pe model
+                modelEntity.generateCollisionShapes(recursive: true)
+                anchor.addChild(modelEntity)
+
                 if let arView = arView {
-                    arView.installGestures([.rotation, .scale], for: entity)
+                    arView.installGestures([.rotation, .scale], for: modelEntity)
                 }
 
                 parent.stage = .placed
@@ -263,6 +266,41 @@ struct ARViewContainer: UIViewRepresentable {
                 parent.errorText = error.localizedDescription
                 parent.stage = .failed
             }
+        }
+
+        // Conversie SCNScene → RealityKit ModelEntity
+        @MainActor
+        func convertToRealityKit(scnScene: SCNScene) async throws -> ModelEntity {
+            // Exportam SCNScene ca USDZ temporar, apoi il citim cu RealityKit
+            // Aceasta e metoda cea mai sigura de conversie pe device
+            let tempDir = FileManager.default.temporaryDirectory
+            let tempUSDZ = tempDir.appendingPathComponent("converted_\(UUID().uuidString).usdz")
+
+            // SceneKit poate exporta USDZ nativ
+            let exported = scnScene.write(
+                to: tempUSDZ,
+                options: nil,
+                delegate: nil,
+                progressHandler: nil
+            )
+
+            guard exported else {
+                throw ConversionError.exportFailed
+            }
+
+            // RealityKit citeste USDZ-ul corect generat
+            let entity = try await ModelEntity(contentsOf: tempUSDZ)
+            try? FileManager.default.removeItem(at: tempUSDZ)
+            return entity
+        }
+    }
+}
+
+enum ConversionError: LocalizedError {
+    case exportFailed
+    var errorDescription: String? {
+        switch self {
+        case .exportFailed: return "Conversia GLB->USDZ a esuat"
         }
     }
 }
