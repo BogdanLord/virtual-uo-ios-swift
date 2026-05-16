@@ -116,13 +116,12 @@ struct ARExperienceView: View {
         case .scanning: return "Misca telefonul ca sa scanezi podeaua"
         case .readyToPlace: return "Atinge ecranul ca sa plasezi modelul"
         case .downloading: return "Se incarca modelul... \(statusDetail)"
-        case .placed: return "Model plasat! Exploreaza-l"
+        case .placed: return "Pinch pentru zoom, roteste cu 2 degete"
         case .failed: return "A aparut o problema"
         }
     }
 }
 
-// MARK: - ARView Container
 struct ARViewContainer: UIViewRepresentable {
     let experience: Experience
     @Binding var stage: ARExperienceView.ARStage
@@ -135,6 +134,7 @@ struct ARViewContainer: UIViewRepresentable {
         let config = ARWorldTrackingConfiguration()
         config.planeDetection = [.horizontal]
         config.environmentTexturing = .automatic
+        config.worldAlignment = .gravity
 
         arView.session.run(config)
         arView.session.delegate = context.coordinator
@@ -155,12 +155,12 @@ struct ARViewContainer: UIViewRepresentable {
         Coordinator(self)
     }
 
-    // MARK: - Coordinator
     class Coordinator: NSObject, ARSessionDelegate {
         var parent: ARViewContainer
         weak var arView: ARView?
         var hasFoundPlane = false
         var modelPlaced = false
+        var modelEntity: ModelEntity?
 
         init(_ parent: ARViewContainer) {
             self.parent = parent
@@ -189,33 +189,46 @@ struct ARViewContainer: UIViewRepresentable {
                   parent.stage == .readyToPlace else { return }
 
             let tapLocation = sender.location(in: arView)
+
             let results = arView.raycast(
                 from: tapLocation,
-                allowing: .estimatedPlane,
+                allowing: .existingPlaneGeometry,
                 alignment: .horizontal
             )
 
-            guard let firstResult = results.first else { return }
+            let raycastResult = results.first ?? arView.raycast(
+                from: tapLocation,
+                allowing: .estimatedPlane,
+                alignment: .horizontal
+            ).first
+
+            guard let result = raycastResult else {
+                DispatchQueue.main.async {
+                    self.parent.statusDetail = "indreapta spre podea"
+                }
+                return
+            }
 
             modelPlaced = true
-            let anchor = AnchorEntity(world: firstResult.worldTransform)
-            arView.scene.addAnchor(anchor)
+
+            let arAnchor = ARAnchor(name: "modelAnchor", transform: result.worldTransform)
+            arView.session.add(anchor: arAnchor)
+
+            let anchorEntity = AnchorEntity(anchor: arAnchor)
+            arView.scene.addAnchor(anchorEntity)
 
             DispatchQueue.main.async {
                 self.parent.stage = .downloading
             }
 
             Task {
-                await self.loadGLBModel(anchor: anchor)
+                await self.loadGLBModel(anchorEntity: anchorEntity)
             }
         }
 
-        // Incarca GLB cu GLTFKit2 si il plaseaza
         @MainActor
-        func loadGLBModel(anchor: AnchorEntity) async {
-            // Folosim GLB (model_url) - GLTFKit2 il citeste direct
-            guard let glbURLString = parent.experience.model_url,
-                  let glbURL = URL(string: glbURLString) else {
+        func loadGLBModel(anchorEntity: AnchorEntity) async {
+            guard let glbURLString = parent.experience.model_url else {
                 parent.errorText = "Nu exista model GLB"
                 parent.stage = .failed
                 return
@@ -223,18 +236,12 @@ struct ARViewContainer: UIViewRepresentable {
 
             do {
                 parent.statusDetail = "descarcare..."
-
-                // Descarcam GLB-ul local
                 let localURL = try await ARModelDownloader.shared.downloadModel(from: glbURLString)
 
                 parent.statusDetail = "procesare GLB..."
-
-                // GLTFKit2 incarca GLB-ul
                 let asset = try await GLTFAsset(url: localURL)
 
                 parent.statusDetail = "construire scena..."
-
-                // Convertim in SceneKit node, apoi in RealityKit
                 let sceneSource = GLTFSCNSceneSource(asset: asset)
                 guard let scnScene = sceneSource.defaultScene else {
                     parent.errorText = "Scena GLB goala"
@@ -242,22 +249,31 @@ struct ARViewContainer: UIViewRepresentable {
                     return
                 }
 
-                // Convertim SCNNode → ModelEntity prin generare mesh
                 let modelEntity = try await convertToRealityKit(scnScene: scnScene)
 
-                // Scalam la ~30cm
                 let bounds = modelEntity.visualBounds(relativeTo: nil)
+                let center = bounds.center
+                modelEntity.position = SIMD3<Float>(
+                    -center.x,
+                    -bounds.min.y,
+                    -center.z
+                )
+
                 let maxDim = max(bounds.extents.x, max(bounds.extents.y, bounds.extents.z))
                 if maxDim > 0 {
                     let scale = Float(0.3) / maxDim
                     modelEntity.scale = SIMD3<Float>(repeating: scale)
                 }
 
-                modelEntity.generateCollisionShapes(recursive: true)
-                anchor.addChild(modelEntity)
+                let wrapper = ModelEntity()
+                wrapper.addChild(modelEntity)
+                wrapper.generateCollisionShapes(recursive: true)
+
+                anchorEntity.addChild(wrapper)
+                self.modelEntity = wrapper
 
                 if let arView = arView {
-                    arView.installGestures([.rotation, .scale], for: modelEntity)
+                    arView.installGestures([.scale, .rotation], for: wrapper)
                 }
 
                 parent.stage = .placed
@@ -268,15 +284,11 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
 
-        // Conversie SCNScene → RealityKit ModelEntity
         @MainActor
         func convertToRealityKit(scnScene: SCNScene) async throws -> ModelEntity {
-            // Exportam SCNScene ca USDZ temporar, apoi il citim cu RealityKit
-            // Aceasta e metoda cea mai sigura de conversie pe device
             let tempDir = FileManager.default.temporaryDirectory
             let tempUSDZ = tempDir.appendingPathComponent("converted_\(UUID().uuidString).usdz")
 
-            // SceneKit poate exporta USDZ nativ
             let exported = scnScene.write(
                 to: tempUSDZ,
                 options: nil,
@@ -288,7 +300,6 @@ struct ARViewContainer: UIViewRepresentable {
                 throw ConversionError.exportFailed
             }
 
-            // RealityKit citeste USDZ-ul corect generat
             let entity = try await ModelEntity(contentsOf: tempUSDZ)
             try? FileManager.default.removeItem(at: tempUSDZ)
             return entity
