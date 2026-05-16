@@ -10,6 +10,7 @@ struct ARExperienceView: View {
     @State private var stage: ARStage = .scanning
     @State private var statusDetail = ""
     @State private var errorText: String?
+    @State private var selectedAnnotation: Annotation?
 
     enum ARStage {
         case scanning, readyToPlace, downloading, placed, failed
@@ -21,14 +22,21 @@ struct ARExperienceView: View {
                 experience: experience,
                 stage: $stage,
                 statusDetail: $statusDetail,
-                errorText: $errorText
+                errorText: $errorText,
+                selectedAnnotation: $selectedAnnotation
             )
             .ignoresSafeArea()
 
             VStack {
                 topBar
                 Spacer()
-                bottomStatus
+                if selectedAnnotation == nil {
+                    bottomStatus
+                }
+            }
+
+            if let ann = selectedAnnotation {
+                annotationPanel(ann)
             }
         }
         .navigationBarHidden(true)
@@ -42,12 +50,14 @@ struct ARExperienceView: View {
         }
         .onDisappear {
             AppDelegate.orientationLock = .all
+            TTSService.shared.stop()
         }
     }
 
     private var topBar: some View {
         HStack {
             Button {
+                TTSService.shared.stop()
                 dismiss()
             } label: {
                 HStack(spacing: 6) {
@@ -106,8 +116,61 @@ struct ARExperienceView: View {
         case .scanning: return "Misca telefonul ca sa scanezi podeaua"
         case .readyToPlace: return "Atinge ecranul ca sa plasezi modelul"
         case .downloading: return "Se incarca modelul... \(statusDetail)"
-        case .placed: return "Pinch = zoom, 2 degete = rotire"
+        case .placed: return "Atinge punctele verzi pentru detalii"
         case .failed: return "A aparut o problema"
+        }
+    }
+
+    // Panou adnotare jos
+    private func annotationPanel(_ ann: Annotation) -> some View {
+        VStack {
+            Spacer()
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(ann.title)
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(Color(red: 0.0, green: 1.0, blue: 0.53))
+                    Spacer()
+                    Button {
+                        TTSService.shared.stop()
+                        selectedAnnotation = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundColor(.gray)
+                    }
+                }
+
+                if let text = ann.text, !text.isEmpty {
+                    ScrollView {
+                        Text(text)
+                            .font(.system(size: 14))
+                            .foregroundColor(.white.opacity(0.9))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 120)
+
+                    Button {
+                        TTSService.shared.speak(text)
+                    } label: {
+                        HStack {
+                            Image(systemName: "speaker.wave.2.fill")
+                            Text("Asculta Audio")
+                        }
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(Color(red: 0.18, green: 0.83, blue: 0.75))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color(red: 0.18, green: 0.83, blue: 0.75).opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+            .padding(18)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 24)
         }
     }
 }
@@ -117,6 +180,7 @@ struct ARViewContainer: UIViewRepresentable {
     @Binding var stage: ARExperienceView.ARStage
     @Binding var statusDetail: String
     @Binding var errorText: String?
+    @Binding var selectedAnnotation: Annotation?
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -130,28 +194,24 @@ struct ARViewContainer: UIViewRepresentable {
         arView.session.delegate = context.coordinator
         context.coordinator.arView = arView
 
-        // TAP - plasare model
         let tap = UITapGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handleTap(_:))
         )
         arView.addGestureRecognizer(tap)
 
-        // PINCH - zoom pe tot ecranul
         let pinch = UIPinchGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePinch(_:))
         )
         arView.addGestureRecognizer(pinch)
 
-        // ROTATION - rotire cu 2 degete pe tot ecranul
         let rotation = UIRotationGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handleRotation(_:))
         )
         arView.addGestureRecognizer(rotation)
 
-        // Permitem pinch si rotation simultan
         pinch.delegate = context.coordinator
         rotation.delegate = context.coordinator
 
@@ -170,19 +230,18 @@ struct ARViewContainer: UIViewRepresentable {
         var hasFoundPlane = false
         var modelPlaced = false
 
-        // Entitatea pe care aplicam transformarile (rotire/scalare)
         var transformEntity: Entity?
-
-        // Valorile curente de transformare
         var currentScale: Float = 1.0
         var currentRotationY: Float = 0.0
         var baseScale: Float = 1.0
+
+        // Maparea entitate-sfera → adnotare
+        var annotationEntities: [ObjectIdentifier: Annotation] = [:]
 
         init(_ parent: ARViewContainer) {
             self.parent = parent
         }
 
-        // Permite pinch + rotate simultan
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
@@ -208,12 +267,31 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
 
-        // ── TAP: plaseaza modelul ──
+        // TAP - plaseaza model SAU selecteaza adnotare
         @objc func handleTap(_ sender: UITapGestureRecognizer) {
-            guard let arView = arView, !modelPlaced,
-                  parent.stage == .readyToPlace else { return }
-
+            guard let arView = arView else { return }
             let tapLocation = sender.location(in: arView)
+
+            // Daca modelul e plasat, verificam daca am atins o adnotare
+            if modelPlaced {
+                if let hitEntity = arView.entity(at: tapLocation) {
+                    // Cautam in ierarhie o adnotare
+                    var entity: Entity? = hitEntity
+                    while let e = entity {
+                        if let ann = annotationEntities[ObjectIdentifier(e)] {
+                            DispatchQueue.main.async {
+                                self.parent.selectedAnnotation = ann
+                            }
+                            return
+                        }
+                        entity = e.parent
+                    }
+                }
+                return
+            }
+
+            // Altfel, plasam modelul
+            guard parent.stage == .readyToPlace else { return }
 
             let results = arView.raycast(
                 from: tapLocation,
@@ -234,11 +312,8 @@ struct ARViewContainer: UIViewRepresentable {
             }
 
             modelPlaced = true
-
-            // ARAnchor real - ARKit il tine fix in lume
             let arAnchor = ARAnchor(name: "modelAnchor", transform: result.worldTransform)
             arView.session.add(anchor: arAnchor)
-
             let anchorEntity = AnchorEntity(anchor: arAnchor)
             arView.scene.addAnchor(anchorEntity)
 
@@ -251,35 +326,25 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
 
-        // ── PINCH: zoom pe tot ecranul ──
         @objc func handlePinch(_ sender: UIPinchGestureRecognizer) {
-            guard let transformEntity = transformEntity else { return }
-
-            if sender.state == .began {
-                baseScale = currentScale
-            }
-
+            guard transformEntity != nil else { return }
+            if sender.state == .began { baseScale = currentScale }
             if sender.state == .changed || sender.state == .ended {
-                // Scalam pornind de la baza, limitam intre 0.2x si 5x
                 let newScale = baseScale * Float(sender.scale)
                 currentScale = min(max(newScale, 0.2), 5.0)
                 applyTransform()
             }
         }
 
-        // ── ROTATION: rotire stanga-dreapta pe loc ──
         @objc func handleRotation(_ sender: UIRotationGestureRecognizer) {
-            guard let transformEntity = transformEntity else { return }
-
+            guard transformEntity != nil else { return }
             if sender.state == .changed || sender.state == .ended {
-                // Rotim pe axa Y (verticala) - modelul se suceste pe loc
                 currentRotationY -= Float(sender.rotation)
-                sender.rotation = 0  // reset incremental
+                sender.rotation = 0
                 applyTransform()
             }
         }
 
-        // Aplica scalarea + rotirea pe entitate
         func applyTransform() {
             guard let entity = transformEntity else { return }
             entity.transform.scale = SIMD3<Float>(repeating: currentScale)
@@ -289,7 +354,6 @@ struct ARViewContainer: UIViewRepresentable {
             )
         }
 
-        // ── INCARCARE MODEL ──
         @MainActor
         func loadGLBModel(anchorEntity: AnchorEntity) async {
             guard let glbURLString = parent.experience.model_url else {
@@ -315,31 +379,27 @@ struct ARViewContainer: UIViewRepresentable {
 
                 let rawModel = try await convertToRealityKit(scnScene: scnScene)
 
-                // ═══ CENTRARE CORECTA ═══
-                // 1. Calculam bounding box-ul real
                 let bounds = rawModel.visualBounds(relativeTo: nil)
                 let center = bounds.center
                 let maxDim = max(bounds.extents.x, max(bounds.extents.y, bounds.extents.z))
                 let normalizeScale = maxDim > 0 ? (Float(0.3) / maxDim) : 1.0
 
-                // 2. innerEntity: muta geometria ca centrul ei sa fie la (0,0,0)
-                //    Asta face ca scalarea/rotirea sa se faca FIX pe centru
                 let innerEntity = Entity()
                 rawModel.position = SIMD3<Float>(-center.x, -center.y, -center.z)
                 innerEntity.addChild(rawModel)
 
-                // 3. transformEntity: aici aplicam scale + rotatie (pivot = centru)
                 let transformEntity = Entity()
                 transformEntity.addChild(innerEntity)
 
-                // 4. baseEntity: ridica modelul ca baza sa fie pe podea
-                //    Inaltimea modelului dupa normalizare
+                // ── ADNOTARI 3D ──
+                // Adaugam sfere verzi in transformEntity (se scaleaza/rotesc cu modelul)
+                addAnnotations(to: transformEntity, modelBounds: bounds)
+
                 let modelHeight = bounds.extents.y * normalizeScale
                 let baseEntity = Entity()
                 baseEntity.position = SIMD3<Float>(0, modelHeight / 2.0, 0)
                 baseEntity.addChild(transformEntity)
 
-                // Salvam referinta + setam scala initiala
                 self.transformEntity = transformEntity
                 self.currentScale = normalizeScale
                 self.baseScale = normalizeScale
@@ -347,12 +407,47 @@ struct ARViewContainer: UIViewRepresentable {
                 applyTransform()
 
                 anchorEntity.addChild(baseEntity)
-
                 parent.stage = .placed
 
             } catch {
                 parent.errorText = error.localizedDescription
                 parent.stage = .failed
+            }
+        }
+
+        // Creeaza sferele de adnotare
+        func addAnnotations(to parentEntity: Entity, modelBounds: BoundingBox) {
+            guard let annotations = parent.experience.annotations else { return }
+
+            for ann in annotations {
+                // Pozitia 3D din baza de date
+                let pos = ann.position3D
+
+                // Sfera verde
+                let sphere = MeshResource.generateSphere(radius: 0.04)
+                var material = UnlitMaterial()
+                material.color = .init(tint: UIColor(
+                    red: 0, green: 1, blue: 0.53, alpha: 1
+                ))
+                let sphereEntity = ModelEntity(mesh: sphere, materials: [material])
+                sphereEntity.position = pos
+
+                // Collision ca sa fie detectabila la tap
+                sphereEntity.generateCollisionShapes(recursive: false)
+
+                // Halo (sfera mai mare semitransparenta)
+                let halo = MeshResource.generateSphere(radius: 0.06)
+                var haloMat = UnlitMaterial()
+                haloMat.color = .init(tint: UIColor(
+                    red: 0, green: 1, blue: 0.53, alpha: 0.25
+                ))
+                let haloEntity = ModelEntity(mesh: halo, materials: [haloMat])
+                sphereEntity.addChild(haloEntity)
+
+                parentEntity.addChild(sphereEntity)
+
+                // Mapam entitatea la adnotare
+                annotationEntities[ObjectIdentifier(sphereEntity)] = ann
             }
         }
 
