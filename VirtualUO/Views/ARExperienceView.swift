@@ -116,12 +116,11 @@ struct ARExperienceView: View {
         case .scanning: return "Misca telefonul ca sa scanezi podeaua"
         case .readyToPlace: return "Atinge ecranul ca sa plasezi modelul"
         case .downloading: return "Se incarca modelul... \(statusDetail)"
-        case .placed: return "Atinge punctele verzi pentru detalii"
+        case .placed: return "Atinge etichetele pentru detalii"
         case .failed: return "A aparut o problema"
         }
     }
 
-    // Panou adnotare jos
     private func annotationPanel(_ ann: Annotation) -> some View {
         VStack {
             Spacer()
@@ -215,6 +214,9 @@ struct ARViewContainer: UIViewRepresentable {
         pinch.delegate = context.coordinator
         rotation.delegate = context.coordinator
 
+        // Billboard update - orienteaza label-urile spre camera la fiecare frame
+        context.coordinator.startBillboardUpdates()
+
         return arView
     }
 
@@ -235,8 +237,10 @@ struct ARViewContainer: UIViewRepresentable {
         var currentRotationY: Float = 0.0
         var baseScale: Float = 1.0
 
-        // Maparea entitate-sfera → adnotare
         var annotationEntities: [ObjectIdentifier: Annotation] = [:]
+        // Label-urile care trebuie orientate spre camera
+        var billboardEntities: [Entity] = []
+        var displayLink: CADisplayLink?
 
         init(_ parent: ARViewContainer) {
             self.parent = parent
@@ -247,6 +251,29 @@ struct ARViewContainer: UIViewRepresentable {
             shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
         ) -> Bool {
             return true
+        }
+
+        // Pornim update loop pentru billboard
+        func startBillboardUpdates() {
+            displayLink = CADisplayLink(target: self, selector: #selector(updateBillboards))
+            displayLink?.add(to: .main, forMode: .common)
+        }
+
+        @objc func updateBillboards() {
+            guard let arView = arView else { return }
+            let camTransform = arView.cameraTransform
+            let camPos = camTransform.translation
+
+            for label in billboardEntities {
+                // Orientam label-ul spre camera, doar pe axa Y (sa ramana drept)
+                let labelPos = label.position(relativeTo: nil)
+                let dir = camPos - labelPos
+                let angle = atan2(dir.x, dir.z)
+                label.setOrientation(
+                    simd_quatf(angle: angle, axis: SIMD3<Float>(0, 1, 0)),
+                    relativeTo: nil
+                )
+            }
         }
 
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
@@ -267,15 +294,12 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
 
-        // TAP - plaseaza model SAU selecteaza adnotare
         @objc func handleTap(_ sender: UITapGestureRecognizer) {
             guard let arView = arView else { return }
             let tapLocation = sender.location(in: arView)
 
-            // Daca modelul e plasat, verificam daca am atins o adnotare
             if modelPlaced {
                 if let hitEntity = arView.entity(at: tapLocation) {
-                    // Cautam in ierarhie o adnotare
                     var entity: Entity? = hitEntity
                     while let e = entity {
                         if let ann = annotationEntities[ObjectIdentifier(e)] {
@@ -290,7 +314,6 @@ struct ARViewContainer: UIViewRepresentable {
                 return
             }
 
-            // Altfel, plasam modelul
             guard parent.stage == .readyToPlace else { return }
 
             let results = arView.raycast(
@@ -391,9 +414,7 @@ struct ARViewContainer: UIViewRepresentable {
                 let transformEntity = Entity()
                 transformEntity.addChild(innerEntity)
 
-                // ── ADNOTARI 3D ──
-                // Adaugam sfere verzi in transformEntity (se scaleaza/rotesc cu modelul)
-                addAnnotations(to: transformEntity, modelBounds: bounds)
+                addAnnotations(to: transformEntity)
 
                 let modelHeight = bounds.extents.y * normalizeScale
                 let baseEntity = Entity()
@@ -415,39 +436,86 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
 
-        // Creeaza sferele de adnotare
-        func addAnnotations(to parentEntity: Entity, modelBounds: BoundingBox) {
+        // Creeaza marker minuscul + linie + label
+        func addAnnotations(to parentEntity: Entity) {
             guard let annotations = parent.experience.annotations else { return }
 
             for ann in annotations {
-                // Pozitia 3D din baza de date
                 let pos = ann.position3D
+                let lineHeight: Float = 0.12
 
-                // Sfera verde
-                let sphere = MeshResource.generateSphere(radius: 0.04)
-                var material = UnlitMaterial()
-                material.color = .init(tint: UIColor(
-                    red: 0, green: 1, blue: 0.53, alpha: 1
-                ))
-                let sphereEntity = ModelEntity(mesh: sphere, materials: [material])
-                sphereEntity.position = pos
+                // Container pentru toata adnotarea
+                let container = Entity()
+                container.position = pos
 
-                // Collision ca sa fie detectabila la tap
-                sphereEntity.generateCollisionShapes(recursive: false)
+                // ── 1. PUNCT MINUSCUL pe componenta ──
+                let dotMesh = MeshResource.generateSphere(radius: 0.006)
+                var dotMat = UnlitMaterial()
+                dotMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 1))
+                let dot = ModelEntity(mesh: dotMesh, materials: [dotMat])
+                container.addChild(dot)
 
-                // Halo (sfera mai mare semitransparenta)
-                let halo = MeshResource.generateSphere(radius: 0.06)
-                var haloMat = UnlitMaterial()
-                haloMat.color = .init(tint: UIColor(
-                    red: 0, green: 1, blue: 0.53, alpha: 0.25
-                ))
-                let haloEntity = ModelEntity(mesh: halo, materials: [haloMat])
-                sphereEntity.addChild(haloEntity)
+                // ── 2. LINIE VERTICALA subtire in sus ──
+                let lineMesh = MeshResource.generateBox(
+                    size: SIMD3<Float>(0.002, lineHeight, 0.002)
+                )
+                var lineMat = UnlitMaterial()
+                lineMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 0.9))
+                let line = ModelEntity(mesh: lineMesh, materials: [lineMat])
+                line.position = SIMD3<Float>(0, lineHeight / 2, 0)
+                container.addChild(line)
 
-                parentEntity.addChild(sphereEntity)
+                // ── 3. LABEL cu titlul la capatul liniei ──
+                let labelText = MeshResource.generateText(
+                    ann.title,
+                    extrusionDepth: 0.001,
+                    font: .systemFont(ofSize: 0.035, weight: .bold),
+                    containerFrame: .zero,
+                    alignment: .center,
+                    lineBreakMode: .byTruncatingTail
+                )
+                var textMat = UnlitMaterial()
+                textMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 1))
+                let textEntity = ModelEntity(mesh: labelText, materials: [textMat])
 
-                // Mapam entitatea la adnotare
-                annotationEntities[ObjectIdentifier(sphereEntity)] = ann
+                // Centram textul
+                let textBounds = textEntity.visualBounds(relativeTo: nil)
+                textEntity.position = SIMD3<Float>(
+                    -textBounds.extents.x / 2,
+                    0, 0
+                )
+
+                // Fundal pentru text (placuta neagra)
+                let bgWidth = textBounds.extents.x + 0.03
+                let bgHeight = textBounds.extents.y + 0.02
+                let bgMesh = MeshResource.generateBox(
+                    size: SIMD3<Float>(bgWidth, bgHeight, 0.001),
+                    cornerRadius: 0.005
+                )
+                var bgMat = UnlitMaterial()
+                bgMat.color = .init(tint: UIColor(white: 0, alpha: 0.8))
+                let bg = ModelEntity(mesh: bgMesh, materials: [bgMat])
+                bg.position = SIMD3<Float>(0, textBounds.extents.y / 2, -0.001)
+
+                // labelGroup: contine fundal + text, pozitionat sus la capatul liniei
+                let labelGroup = Entity()
+                labelGroup.position = SIMD3<Float>(0, lineHeight + 0.02, 0)
+                labelGroup.addChild(bg)
+                labelGroup.addChild(textEntity)
+
+                // Collision pe fundal ca sa fie apasabil
+                bg.generateCollisionShapes(recursive: false)
+
+                container.addChild(labelGroup)
+                parentEntity.addChild(container)
+
+                // Label-ul se orienteaza spre camera
+                billboardEntities.append(labelGroup)
+
+                // Tap pe label sau fundal → adnotarea
+                annotationEntities[ObjectIdentifier(bg)] = ann
+                annotationEntities[ObjectIdentifier(textEntity)] = ann
+                annotationEntities[ObjectIdentifier(labelGroup)] = ann
             }
         }
 
