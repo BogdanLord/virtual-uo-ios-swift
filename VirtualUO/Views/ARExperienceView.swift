@@ -13,48 +13,36 @@ struct ARExperienceView: View {
     @State private var selectedAnnotation: Annotation?
     @State private var sidebarOpen = false
 
+    // Task state
+    @State private var taskMenuOpen = false
+    @State private var activeTask: TaskKind?
+    @State private var progress: [String: ProgressService.TaskStatus] = [:]
+    @State private var feedback: (success: Bool, message: String)?
+    @State private var localizationTaskActive: LocalizationTask?
+
     private let accent = Color(red: 0.0, green: 1.0, blue: 0.53)
+    private let taskAccent = Color(red: 0.0, green: 0.67, blue: 1.0)
 
     enum ARStage {
         case scanning, readyToPlace, downloading, placed, failed
     }
 
+    private var allTasks: [TaskKind] {
+        var result: [TaskKind] = []
+        (experience.localizations ?? []).forEach { result.append(.localization($0)) }
+        (experience.identifications ?? []).forEach { result.append(.identification($0)) }
+        (experience.quizzes ?? []).forEach { result.append(.quiz($0)) }
+        return result
+    }
+
     var body: some View {
         ZStack {
-            ARViewContainer(
-                experience: experience,
-                stage: $stage,
-                statusDetail: $statusDetail,
-                errorText: $errorText,
-                selectedAnnotation: $selectedAnnotation
-            )
-            .ignoresSafeArea()
-
-            VStack {
-                topBar
-                Spacer()
-                if selectedAnnotation == nil && !sidebarOpen {
-                    bottomStatus
-                }
-            }
-
-            if stage == .placed {
-                AnnotationSidebar(
-                    annotations: experience.annotations ?? [],
-                    onSelect: { ann in
-                        withAnimation { sidebarOpen = false }
-                        selectedAnnotation = ann
-                    },
-                    isOpen: $sidebarOpen
-                )
-            }
-
-            if let ann = selectedAnnotation {
-                AnnotationSheet(annotation: ann) {
-                    TTSService.shared.stop()
-                    selectedAnnotation = nil
-                }
-            }
+            arLayer
+            uiLayer
+            sidebarLayer
+            taskLayer
+            sheetLayer
+            feedbackLayer
         }
         .navigationBarHidden(true)
         .statusBarHidden(true)
@@ -64,6 +52,7 @@ struct ARExperienceView: View {
                 UIInterfaceOrientation.landscapeRight.rawValue,
                 forKey: "orientation"
             )
+            progress = ProgressService.shared.getProgress(experienceId: experience.id)
         }
         .onDisappear {
             AppDelegate.orientationLock = .all
@@ -71,54 +60,165 @@ struct ARExperienceView: View {
         }
     }
 
+    // MARK: - Layers
+
+    private var arLayer: some View {
+        ARViewContainer(
+            experience: experience,
+            stage: $stage,
+            statusDetail: $statusDetail,
+            errorText: $errorText,
+            selectedAnnotation: $selectedAnnotation,
+            onAnnotationTapped: { ann in
+                handleAnnotationTap(ann)
+            }
+        )
+        .ignoresSafeArea()
+    }
+
+    private var uiLayer: some View {
+        VStack {
+            topBar
+            Spacer()
+            if selectedAnnotation == nil && !sidebarOpen && !taskMenuOpen
+                && activeTask == nil {
+                bottomStatus
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var sidebarLayer: some View {
+        if stage == .placed {
+            AnnotationSidebar(
+                annotations: experience.annotations ?? [],
+                onSelect: { ann in
+                    withAnimation { sidebarOpen = false }
+                    selectedAnnotation = ann
+                },
+                isOpen: $sidebarOpen
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var taskLayer: some View {
+        if stage == .placed {
+            TaskMenu(
+                tasks: allTasks,
+                progress: progress,
+                onSelect: { task in
+                    withAnimation { taskMenuOpen = false }
+                    startTask(task)
+                },
+                isOpen: $taskMenuOpen
+            )
+        }
+
+        if let task = activeTask {
+            ActiveTaskCard(
+                task: task,
+                annotations: experience.annotations ?? [],
+                onPass: { completeTask(task, success: true) },
+                onFail: { completeTask(task, success: false) },
+                onClose: { activeTask = nil; localizationTaskActive = nil }
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var sheetLayer: some View {
+        if let ann = selectedAnnotation {
+            AnnotationSheet(annotation: ann) {
+                TTSService.shared.stop()
+                selectedAnnotation = nil
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var feedbackLayer: some View {
+        if let fb = feedback {
+            TaskFeedback(isSuccess: fb.success, message: fb.message)
+        }
+    }
+
+    // MARK: - Top bar
+
     private var topBar: some View {
         HStack {
-            Button {
-                TTSService.shared.stop()
-                dismiss()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark")
-                    Text("Inchide")
-                }
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(Color.red.opacity(0.85))
-                .clipShape(Capsule())
-            }
-
+            closeButton
             Spacer()
-
-            Text(experience.title)
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
-
+            titleBadge
             Spacer()
-
             if stage == .placed {
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                        sidebarOpen.toggle()
-                    }
-                } label: {
-                    Image(systemName: "list.bullet")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundColor(.black)
-                        .padding(12)
-                        .background(accent)
-                        .clipShape(Circle())
-                }
+                taskButton
+                sidebarButton
             }
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
+    }
+
+    private var closeButton: some View {
+        Button {
+            TTSService.shared.stop()
+            dismiss()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "xmark")
+                Text("Inchide")
+            }
+            .font(.system(size: 14, weight: .bold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.red.opacity(0.85))
+            .clipShape(Capsule())
+        }
+    }
+
+    private var titleBadge: some View {
+        Text(experience.title)
+            .font(.system(size: 12, weight: .bold))
+            .foregroundColor(.white)
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule())
+    }
+
+    private var taskButton: some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                sidebarOpen = false
+                taskMenuOpen.toggle()
+            }
+        } label: {
+            Image(systemName: "checklist")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.white)
+                .padding(12)
+                .background(taskAccent)
+                .clipShape(Circle())
+        }
+    }
+
+    private var sidebarButton: some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                taskMenuOpen = false
+                sidebarOpen.toggle()
+            }
+        } label: {
+            Image(systemName: "list.bullet")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.black)
+                .padding(12)
+                .background(accent)
+                .clipShape(Circle())
+        }
     }
 
     private var bottomStatus: some View {
@@ -135,9 +235,7 @@ struct ARExperienceView: View {
             } else {
                 HStack(spacing: 8) {
                     if stage == .downloading {
-                        ProgressView()
-                            .tint(accent)
-                            .scaleEffect(0.8)
+                        ProgressView().tint(accent).scaleEffect(0.8)
                     }
                     Text(statusText)
                         .font(.system(size: 14, weight: .semibold))
@@ -147,9 +245,7 @@ struct ARExperienceView: View {
                 .padding(.vertical, 12)
                 .background(.ultraThinMaterial)
                 .clipShape(Capsule())
-                .overlay(
-                    Capsule().stroke(accent.opacity(0.3), lineWidth: 1)
-                )
+                .overlay(Capsule().stroke(accent.opacity(0.3), lineWidth: 1))
             }
         }
         .padding(.bottom, 24)
@@ -160,8 +256,62 @@ struct ARExperienceView: View {
         case .scanning: return "Misca telefonul ca sa scanezi podeaua"
         case .readyToPlace: return "Atinge ecranul ca sa plasezi modelul"
         case .downloading: return "Se incarca... \(statusDetail)"
-        case .placed: return "Atinge etichetele verzi pentru detalii"
+        case .placed:
+            if localizationTaskActive != nil {
+                return "Atinge eticheta corecta pe model"
+            }
+            return "Atinge etichetele verzi pentru detalii"
         case .failed: return "A aparut o problema"
+        }
+    }
+
+    // MARK: - Task logic
+
+    private func startTask(_ task: TaskKind) {
+        selectedAnnotation = nil
+        if case .localization(let locTask) = task {
+            // Pentru localizare: nu aratam card, asteptam tap pe adnotare
+            localizationTaskActive = locTask
+            activeTask = nil
+        } else {
+            // Identificare / quiz: aratam card
+            localizationTaskActive = nil
+            activeTask = task
+        }
+    }
+
+    private func handleAnnotationTap(_ ann: Annotation) {
+        // Daca e activ un task de localizare, verificam
+        if let locTask = localizationTaskActive {
+            let success = (ann.id == locTask.annotationId)
+            completeTask(.localization(locTask), success: success)
+            localizationTaskActive = nil
+            return
+        }
+        // Altfel, deschidem adnotarea normal
+        selectedAnnotation = ann
+    }
+
+    private func completeTask(_ task: TaskKind, success: Bool) {
+        // Salvam progresul
+        ProgressService.shared.setStatus(
+            success ? .success : .failed,
+            taskId: task.id,
+            experienceId: experience.id
+        )
+        progress = ProgressService.shared.getProgress(experienceId: experience.id)
+
+        // Haptic
+        let gen = UINotificationFeedbackGenerator()
+        gen.notificationOccurred(success ? .success : .error)
+
+        // Inchide card
+        activeTask = nil
+
+        // Arata feedback
+        feedback = (success, success ? "Corect!" : "Gresit!")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            feedback = nil
         }
     }
 }
@@ -172,6 +322,7 @@ struct ARViewContainer: UIViewRepresentable {
     @Binding var statusDetail: String
     @Binding var errorText: String?
     @Binding var selectedAnnotation: Annotation?
+    var onAnnotationTapped: (Annotation) -> Void
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -207,7 +358,6 @@ struct ARViewContainer: UIViewRepresentable {
         rotation.delegate = context.coordinator
 
         context.coordinator.startUpdateLoop()
-
         return arView
     }
 
@@ -250,8 +400,6 @@ struct ARViewContainer: UIViewRepresentable {
 
         @objc func onFrame() {
             guard let arView = arView else { return }
-
-            // Billboard - label-urile spre camera
             let camPos = arView.cameraTransform.translation
             for label in billboardEntities {
                 let labelPos = label.position(relativeTo: nil)
@@ -262,8 +410,6 @@ struct ARViewContainer: UIViewRepresentable {
                     relativeTo: nil
                 )
             }
-
-            // Pulse animat pe puncte
             pulseTime += 0.05
             let pulse = 1.0 + 0.4 * sin(pulseTime)
             for dot in pulseEntities {
@@ -301,7 +447,7 @@ struct ARViewContainer: UIViewRepresentable {
                             let gen = UIImpactFeedbackGenerator(style: .medium)
                             gen.impactOccurred()
                             DispatchQueue.main.async {
-                                self.parent.selectedAnnotation = ann
+                                self.parent.onAnnotationTapped(ann)
                             }
                             return
                         }
@@ -331,7 +477,6 @@ struct ARViewContainer: UIViewRepresentable {
             arView.scene.addAnchor(anchorEntity)
 
             DispatchQueue.main.async { self.parent.stage = .downloading }
-
             Task { await self.loadGLBModel(anchorEntity: anchorEntity) }
         }
 
@@ -421,14 +566,12 @@ struct ARViewContainer: UIViewRepresentable {
                 let container = Entity()
                 container.position = pos
 
-                // PUNCT MINUSCUL
                 let dotMesh = MeshResource.generateSphere(radius: 0.005)
                 var dotMat = UnlitMaterial()
                 dotMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 1))
                 let dot = ModelEntity(mesh: dotMesh, materials: [dotMat])
                 container.addChild(dot)
 
-                // HALO PULSANT
                 let haloMesh = MeshResource.generateSphere(radius: 0.011)
                 var haloMat = UnlitMaterial()
                 haloMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 0.3))
@@ -436,7 +579,6 @@ struct ARViewContainer: UIViewRepresentable {
                 container.addChild(halo)
                 pulseEntities.append(halo)
 
-                // LINIE VERTICALA
                 let lineMesh = MeshResource.generateBox(
                     size: SIMD3<Float>(0.0018, lineHeight, 0.0018)
                 )
@@ -446,7 +588,6 @@ struct ARViewContainer: UIViewRepresentable {
                 line.position = SIMD3<Float>(0, lineHeight / 2, 0)
                 container.addChild(line)
 
-                // LABEL
                 let labelText = MeshResource.generateText(
                     ann.title,
                     extrusionDepth: 0.001,
@@ -471,7 +612,6 @@ struct ARViewContainer: UIViewRepresentable {
                 bgMat.color = .init(tint: UIColor(red: 0.02, green: 0.06, blue: 0.04, alpha: 0.92))
                 let bg = ModelEntity(mesh: bgMesh, materials: [bgMat])
 
-                // Border luminos (box putin mai mare in spate)
                 let borderMesh = MeshResource.generateBox(
                     size: SIMD3<Float>(bgW + 0.004, bgH + 0.004, 0.001),
                     cornerRadius: 0.009
