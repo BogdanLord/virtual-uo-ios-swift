@@ -1,15 +1,16 @@
 ﻿import AVFoundation
 
-// Text-to-Speech in romana
 class TTSService {
     static let shared = TTSService()
     private let synthesizer = AVSpeechSynthesizer()
     private init() {}
 
-    func speak(_ text: String) {
+    func speak(_ text: String, voice: String? = nil) {
         stop()
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "ro-RO")
+        // ttsVoice din DB poate fi gen "ro-MI" - folosim ro-RO ca baza
+        let langCode = (voice?.hasPrefix("ro") == true) ? "ro-RO" : "ro-RO"
+        utterance.voice = AVSpeechSynthesisVoice(language: langCode)
         utterance.rate = 0.48
         utterance.pitchMultiplier = 1.0
         synthesizer.speak(utterance)

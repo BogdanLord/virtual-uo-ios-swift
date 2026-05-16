@@ -11,6 +11,9 @@ struct ARExperienceView: View {
     @State private var statusDetail = ""
     @State private var errorText: String?
     @State private var selectedAnnotation: Annotation?
+    @State private var sidebarOpen = false
+
+    private let accent = Color(red: 0.0, green: 1.0, blue: 0.53)
 
     enum ARStage {
         case scanning, readyToPlace, downloading, placed, failed
@@ -30,13 +33,27 @@ struct ARExperienceView: View {
             VStack {
                 topBar
                 Spacer()
-                if selectedAnnotation == nil {
+                if selectedAnnotation == nil && !sidebarOpen {
                     bottomStatus
                 }
             }
 
+            if stage == .placed {
+                AnnotationSidebar(
+                    annotations: experience.annotations ?? [],
+                    onSelect: { ann in
+                        withAnimation { sidebarOpen = false }
+                        selectedAnnotation = ann
+                    },
+                    isOpen: $sidebarOpen
+                )
+            }
+
             if let ann = selectedAnnotation {
-                annotationPanel(ann)
+                AnnotationSheet(annotation: ann) {
+                    TTSService.shared.stop()
+                    selectedAnnotation = nil
+                }
             }
         }
         .navigationBarHidden(true)
@@ -75,13 +92,30 @@ struct ARExperienceView: View {
             Spacer()
 
             Text(experience.title)
-                .font(.system(size: 14, weight: .bold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.white)
                 .lineLimit(1)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
                 .background(.ultraThinMaterial)
                 .clipShape(Capsule())
+
+            Spacer()
+
+            if stage == .placed {
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        sidebarOpen.toggle()
+                    }
+                } label: {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.black)
+                        .padding(12)
+                        .background(accent)
+                        .clipShape(Circle())
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
@@ -99,13 +133,23 @@ struct ARExperienceView: View {
                     .background(Color.red.opacity(0.85))
                     .clipShape(Capsule())
             } else {
-                Text(statusText)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Capsule())
+                HStack(spacing: 8) {
+                    if stage == .downloading {
+                        ProgressView()
+                            .tint(accent)
+                            .scaleEffect(0.8)
+                    }
+                    Text(statusText)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule().stroke(accent.opacity(0.3), lineWidth: 1)
+                )
             }
         }
         .padding(.bottom, 24)
@@ -115,61 +159,9 @@ struct ARExperienceView: View {
         switch stage {
         case .scanning: return "Misca telefonul ca sa scanezi podeaua"
         case .readyToPlace: return "Atinge ecranul ca sa plasezi modelul"
-        case .downloading: return "Se incarca modelul... \(statusDetail)"
-        case .placed: return "Atinge etichetele pentru detalii"
+        case .downloading: return "Se incarca... \(statusDetail)"
+        case .placed: return "Atinge etichetele verzi pentru detalii"
         case .failed: return "A aparut o problema"
-        }
-    }
-
-    private func annotationPanel(_ ann: Annotation) -> some View {
-        VStack {
-            Spacer()
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text(ann.title)
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(Color(red: 0.0, green: 1.0, blue: 0.53))
-                    Spacer()
-                    Button {
-                        TTSService.shared.stop()
-                        selectedAnnotation = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 26))
-                            .foregroundColor(.gray)
-                    }
-                }
-
-                if let text = ann.text, !text.isEmpty {
-                    ScrollView {
-                        Text(text)
-                            .font(.system(size: 14))
-                            .foregroundColor(.white.opacity(0.9))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 120)
-
-                    Button {
-                        TTSService.shared.speak(text)
-                    } label: {
-                        HStack {
-                            Image(systemName: "speaker.wave.2.fill")
-                            Text("Asculta Audio")
-                        }
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(Color(red: 0.18, green: 0.83, blue: 0.75))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Color(red: 0.18, green: 0.83, blue: 0.75).opacity(0.15))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-            }
-            .padding(18)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .padding(.horizontal, 16)
-            .padding(.bottom, 24)
         }
     }
 }
@@ -214,8 +206,7 @@ struct ARViewContainer: UIViewRepresentable {
         pinch.delegate = context.coordinator
         rotation.delegate = context.coordinator
 
-        // Billboard update - orienteaza label-urile spre camera la fiecare frame
-        context.coordinator.startBillboardUpdates()
+        context.coordinator.startUpdateLoop()
 
         return arView
     }
@@ -238,34 +229,31 @@ struct ARViewContainer: UIViewRepresentable {
         var baseScale: Float = 1.0
 
         var annotationEntities: [ObjectIdentifier: Annotation] = [:]
-        // Label-urile care trebuie orientate spre camera
         var billboardEntities: [Entity] = []
+        var pulseEntities: [ModelEntity] = []
         var displayLink: CADisplayLink?
+        var pulseTime: Float = 0
 
         init(_ parent: ARViewContainer) {
             self.parent = parent
         }
 
         func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
-        ) -> Bool {
-            return true
-        }
+            _ g: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith o: UIGestureRecognizer
+        ) -> Bool { true }
 
-        // Pornim update loop pentru billboard
-        func startBillboardUpdates() {
-            displayLink = CADisplayLink(target: self, selector: #selector(updateBillboards))
+        func startUpdateLoop() {
+            displayLink = CADisplayLink(target: self, selector: #selector(onFrame))
             displayLink?.add(to: .main, forMode: .common)
         }
 
-        @objc func updateBillboards() {
+        @objc func onFrame() {
             guard let arView = arView else { return }
-            let camTransform = arView.cameraTransform
-            let camPos = camTransform.translation
 
+            // Billboard - label-urile spre camera
+            let camPos = arView.cameraTransform.translation
             for label in billboardEntities {
-                // Orientam label-ul spre camera, doar pe axa Y (sa ramana drept)
                 let labelPos = label.position(relativeTo: nil)
                 let dir = camPos - labelPos
                 let angle = atan2(dir.x, dir.z)
@@ -273,6 +261,13 @@ struct ARViewContainer: UIViewRepresentable {
                     simd_quatf(angle: angle, axis: SIMD3<Float>(0, 1, 0)),
                     relativeTo: nil
                 )
+            }
+
+            // Pulse animat pe puncte
+            pulseTime += 0.05
+            let pulse = 1.0 + 0.4 * sin(pulseTime)
+            for dot in pulseEntities {
+                dot.scale = SIMD3<Float>(repeating: pulse)
             }
         }
 
@@ -296,19 +291,21 @@ struct ARViewContainer: UIViewRepresentable {
 
         @objc func handleTap(_ sender: UITapGestureRecognizer) {
             guard let arView = arView else { return }
-            let tapLocation = sender.location(in: arView)
+            let loc = sender.location(in: arView)
 
             if modelPlaced {
-                if let hitEntity = arView.entity(at: tapLocation) {
-                    var entity: Entity? = hitEntity
-                    while let e = entity {
-                        if let ann = annotationEntities[ObjectIdentifier(e)] {
+                if let hit = arView.entity(at: loc) {
+                    var e: Entity? = hit
+                    while let cur = e {
+                        if let ann = annotationEntities[ObjectIdentifier(cur)] {
+                            let gen = UIImpactFeedbackGenerator(style: .medium)
+                            gen.impactOccurred()
                             DispatchQueue.main.async {
                                 self.parent.selectedAnnotation = ann
                             }
                             return
                         }
-                        entity = e.parent
+                        e = cur.parent
                     }
                 }
                 return
@@ -316,45 +313,33 @@ struct ARViewContainer: UIViewRepresentable {
 
             guard parent.stage == .readyToPlace else { return }
 
-            let results = arView.raycast(
-                from: tapLocation,
-                allowing: .existingPlaneGeometry,
-                alignment: .horizontal
-            )
-            let raycastResult = results.first ?? arView.raycast(
-                from: tapLocation,
-                allowing: .estimatedPlane,
-                alignment: .horizontal
-            ).first
+            let r1 = arView.raycast(from: loc, allowing: .existingPlaneGeometry, alignment: .horizontal)
+            let result = r1.first ?? arView.raycast(from: loc, allowing: .estimatedPlane, alignment: .horizontal).first
 
-            guard let result = raycastResult else {
-                DispatchQueue.main.async {
-                    self.parent.statusDetail = "indreapta spre podea"
-                }
+            guard let res = result else {
+                DispatchQueue.main.async { self.parent.statusDetail = "indreapta spre podea" }
                 return
             }
 
             modelPlaced = true
-            let arAnchor = ARAnchor(name: "modelAnchor", transform: result.worldTransform)
+            let gen = UIImpactFeedbackGenerator(style: .heavy)
+            gen.impactOccurred()
+
+            let arAnchor = ARAnchor(name: "modelAnchor", transform: res.worldTransform)
             arView.session.add(anchor: arAnchor)
             let anchorEntity = AnchorEntity(anchor: arAnchor)
             arView.scene.addAnchor(anchorEntity)
 
-            DispatchQueue.main.async {
-                self.parent.stage = .downloading
-            }
+            DispatchQueue.main.async { self.parent.stage = .downloading }
 
-            Task {
-                await self.loadGLBModel(anchorEntity: anchorEntity)
-            }
+            Task { await self.loadGLBModel(anchorEntity: anchorEntity) }
         }
 
         @objc func handlePinch(_ sender: UIPinchGestureRecognizer) {
             guard transformEntity != nil else { return }
             if sender.state == .began { baseScale = currentScale }
             if sender.state == .changed || sender.state == .ended {
-                let newScale = baseScale * Float(sender.scale)
-                currentScale = min(max(newScale, 0.2), 5.0)
+                currentScale = min(max(baseScale * Float(sender.scale), 0.2), 5.0)
                 applyTransform()
             }
         }
@@ -369,12 +354,9 @@ struct ARViewContainer: UIViewRepresentable {
         }
 
         func applyTransform() {
-            guard let entity = transformEntity else { return }
-            entity.transform.scale = SIMD3<Float>(repeating: currentScale)
-            entity.transform.rotation = simd_quatf(
-                angle: currentRotationY,
-                axis: SIMD3<Float>(0, 1, 0)
-            )
+            guard let e = transformEntity else { return }
+            e.transform.scale = SIMD3<Float>(repeating: currentScale)
+            e.transform.rotation = simd_quatf(angle: currentRotationY, axis: SIMD3<Float>(0, 1, 0))
         }
 
         @MainActor
@@ -384,22 +366,17 @@ struct ARViewContainer: UIViewRepresentable {
                 parent.stage = .failed
                 return
             }
-
             do {
                 parent.statusDetail = "descarcare..."
                 let localURL = try await ARModelDownloader.shared.downloadModel(from: glbURLString)
-
-                parent.statusDetail = "procesare GLB..."
+                parent.statusDetail = "procesare..."
                 let asset = try await GLTFAsset(url: localURL)
-
-                parent.statusDetail = "construire scena..."
                 let sceneSource = GLTFSCNSceneSource(asset: asset)
                 guard let scnScene = sceneSource.defaultScene else {
                     parent.errorText = "Scena GLB goala"
                     parent.stage = .failed
                     return
                 }
-
                 let rawModel = try await convertToRealityKit(scnScene: scnScene)
 
                 let bounds = rawModel.visualBounds(relativeTo: nil)
@@ -424,96 +401,101 @@ struct ARViewContainer: UIViewRepresentable {
                 self.transformEntity = transformEntity
                 self.currentScale = normalizeScale
                 self.baseScale = normalizeScale
-                self.currentRotationY = 0
                 applyTransform()
 
                 anchorEntity.addChild(baseEntity)
                 parent.stage = .placed
-
             } catch {
                 parent.errorText = error.localizedDescription
                 parent.stage = .failed
             }
         }
 
-        // Creeaza marker minuscul + linie + label
         func addAnnotations(to parentEntity: Entity) {
             guard let annotations = parent.experience.annotations else { return }
 
             for ann in annotations {
                 let pos = ann.position3D
-                let lineHeight: Float = 0.12
+                let lineHeight: Float = 0.13
 
-                // Container pentru toata adnotarea
                 let container = Entity()
                 container.position = pos
 
-                // ── 1. PUNCT MINUSCUL pe componenta ──
-                let dotMesh = MeshResource.generateSphere(radius: 0.006)
+                // PUNCT MINUSCUL
+                let dotMesh = MeshResource.generateSphere(radius: 0.005)
                 var dotMat = UnlitMaterial()
                 dotMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 1))
                 let dot = ModelEntity(mesh: dotMesh, materials: [dotMat])
                 container.addChild(dot)
 
-                // ── 2. LINIE VERTICALA subtire in sus ──
+                // HALO PULSANT
+                let haloMesh = MeshResource.generateSphere(radius: 0.011)
+                var haloMat = UnlitMaterial()
+                haloMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 0.3))
+                let halo = ModelEntity(mesh: haloMesh, materials: [haloMat])
+                container.addChild(halo)
+                pulseEntities.append(halo)
+
+                // LINIE VERTICALA
                 let lineMesh = MeshResource.generateBox(
-                    size: SIMD3<Float>(0.002, lineHeight, 0.002)
+                    size: SIMD3<Float>(0.0018, lineHeight, 0.0018)
                 )
                 var lineMat = UnlitMaterial()
-                lineMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 0.9))
+                lineMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 0.85))
                 let line = ModelEntity(mesh: lineMesh, materials: [lineMat])
                 line.position = SIMD3<Float>(0, lineHeight / 2, 0)
                 container.addChild(line)
 
-                // ── 3. LABEL cu titlul la capatul liniei ──
+                // LABEL
                 let labelText = MeshResource.generateText(
                     ann.title,
                     extrusionDepth: 0.001,
-                    font: .systemFont(ofSize: 0.035, weight: .bold),
+                    font: .systemFont(ofSize: 0.032, weight: .bold),
                     containerFrame: .zero,
                     alignment: .center,
                     lineBreakMode: .byTruncatingTail
                 )
                 var textMat = UnlitMaterial()
-                textMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 1))
+                textMat.color = .init(tint: .white)
                 let textEntity = ModelEntity(mesh: labelText, materials: [textMat])
+                let tb = textEntity.visualBounds(relativeTo: nil)
+                textEntity.position = SIMD3<Float>(-tb.extents.x / 2, -tb.extents.y / 2, 0.001)
 
-                // Centram textul
-                let textBounds = textEntity.visualBounds(relativeTo: nil)
-                textEntity.position = SIMD3<Float>(
-                    -textBounds.extents.x / 2,
-                    0, 0
-                )
-
-                // Fundal pentru text (placuta neagra)
-                let bgWidth = textBounds.extents.x + 0.03
-                let bgHeight = textBounds.extents.y + 0.02
+                let bgW = tb.extents.x + 0.035
+                let bgH = tb.extents.y + 0.025
                 let bgMesh = MeshResource.generateBox(
-                    size: SIMD3<Float>(bgWidth, bgHeight, 0.001),
-                    cornerRadius: 0.005
+                    size: SIMD3<Float>(bgW, bgH, 0.002),
+                    cornerRadius: 0.008
                 )
                 var bgMat = UnlitMaterial()
-                bgMat.color = .init(tint: UIColor(white: 0, alpha: 0.8))
+                bgMat.color = .init(tint: UIColor(red: 0.02, green: 0.06, blue: 0.04, alpha: 0.92))
                 let bg = ModelEntity(mesh: bgMesh, materials: [bgMat])
-                bg.position = SIMD3<Float>(0, textBounds.extents.y / 2, -0.001)
 
-                // labelGroup: contine fundal + text, pozitionat sus la capatul liniei
+                // Border luminos (box putin mai mare in spate)
+                let borderMesh = MeshResource.generateBox(
+                    size: SIMD3<Float>(bgW + 0.004, bgH + 0.004, 0.001),
+                    cornerRadius: 0.009
+                )
+                var borderMat = UnlitMaterial()
+                borderMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 0.9))
+                let border = ModelEntity(mesh: borderMesh, materials: [borderMat])
+                border.position = SIMD3<Float>(0, 0, -0.001)
+
                 let labelGroup = Entity()
-                labelGroup.position = SIMD3<Float>(0, lineHeight + 0.02, 0)
+                labelGroup.position = SIMD3<Float>(0, lineHeight + 0.025, 0)
+                labelGroup.addChild(border)
                 labelGroup.addChild(bg)
                 labelGroup.addChild(textEntity)
 
-                // Collision pe fundal ca sa fie apasabil
                 bg.generateCollisionShapes(recursive: false)
+                border.generateCollisionShapes(recursive: false)
 
                 container.addChild(labelGroup)
                 parentEntity.addChild(container)
 
-                // Label-ul se orienteaza spre camera
                 billboardEntities.append(labelGroup)
-
-                // Tap pe label sau fundal → adnotarea
                 annotationEntities[ObjectIdentifier(bg)] = ann
+                annotationEntities[ObjectIdentifier(border)] = ann
                 annotationEntities[ObjectIdentifier(textEntity)] = ann
                 annotationEntities[ObjectIdentifier(labelGroup)] = ann
             }
@@ -522,19 +504,9 @@ struct ARViewContainer: UIViewRepresentable {
         @MainActor
         func convertToRealityKit(scnScene: SCNScene) async throws -> ModelEntity {
             let tempDir = FileManager.default.temporaryDirectory
-            let tempUSDZ = tempDir.appendingPathComponent("converted_\(UUID().uuidString).usdz")
-
-            let exported = scnScene.write(
-                to: tempUSDZ,
-                options: nil,
-                delegate: nil,
-                progressHandler: nil
-            )
-
-            guard exported else {
-                throw ConversionError.exportFailed
-            }
-
+            let tempUSDZ = tempDir.appendingPathComponent("conv_\(UUID().uuidString).usdz")
+            let ok = scnScene.write(to: tempUSDZ, options: nil, delegate: nil, progressHandler: nil)
+            guard ok else { throw ConversionError.exportFailed }
             let entity = try await ModelEntity(contentsOf: tempUSDZ)
             try? FileManager.default.removeItem(at: tempUSDZ)
             return entity
