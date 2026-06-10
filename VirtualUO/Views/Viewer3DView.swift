@@ -544,9 +544,9 @@ struct Viewer3DContainer: UIViewRepresentable {
             }
         }
 
-        // Helper SINCRON: TextureResource.load e marcat "noasync" în Swift 6,
-        // deci îl apelăm dintr-o funcție sincronă, nu direct din context async.
-        nonisolated private static func loadTextureSync(_ url: URL) throws -> TextureResource {
+        // Helper SINCRON pe MainActor: TextureResource.load e marcat "noasync",
+        // deci îl apelăm dintr-o funcție sincronă (nu direct din context async).
+        private static func loadTextureSync(_ url: URL) throws -> TextureResource {
             try TextureResource.load(contentsOf: url)
         }
 
