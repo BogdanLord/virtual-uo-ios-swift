@@ -4,18 +4,20 @@ import GLTFKit2
 import SceneKit
 
 // ====================================================================
-//  VIZIONARE 3D (non-AR) — explorezi modelul fără cameră AR:
-//  • rotire cu un deget, zoom cu pinch
-//  • pini de adnotare interactivi (tap -> AnnotationSheet)
-//  • buton FUNDAL 360° — IMPLICIT DEZACTIVAT, se pornește manual
-//  • intro audio + buton mute
-//  Refolosește pipeline-ul GLB -> GLTFKit2 -> USDZ -> RealityKit din AR.
+//  VIZIONARE 3D (non-AR) — v2 MULTI-MODEL
+//  • încarcă TOATE modelele din lecție, cu poziția/scara/rotația
+//    setate în editorul web (layout identic cu platforma)
+//  • adnotările se atașează pe modelul lor (după modelId)
+//  • rotire cu un deget, zoom cu pinch (toată scena, ca un tot unitar)
+//  • buton FUNDAL 360° — IMPLICIT DEZACTIVAT
+//  • intro audio + mute
 // ====================================================================
 struct Viewer3DView: View {
     let experience: Experience
     @Environment(\.dismiss) private var dismiss
 
     @State private var stage: ViewerStage = .loading
+    @State private var loadingText = "Se încarcă..."
     @State private var errorText: String?
     @State private var selectedAnnotation: Annotation?
     @State private var sidebarOpen = false
@@ -33,11 +35,12 @@ struct Viewer3DView: View {
             Viewer3DContainer(
                 experience: experience,
                 stage: $stage,
+                loadingText: $loadingText,
                 errorText: $errorText,
                 show360: $show360,
                 loading360: $loading360,
                 onAnnotationTapped: { ann in
-                    if ann.animationId == nil || true { selectedAnnotation = ann }
+                    selectedAnnotation = ann
                 }
             )
             .ignoresSafeArea()
@@ -73,7 +76,6 @@ struct Viewer3DView: View {
     private var uiLayer: some View {
         VStack {
             HStack(spacing: 10) {
-                // ÎNCHIDE
                 Button {
                     AudioService.shared.silenceAll()
                     dismiss()
@@ -124,7 +126,6 @@ struct Viewer3DView: View {
                     }
                 }
 
-                // LISTĂ ADNOTĂRI
                 if stage == .ready {
                     circleButton(icon: "list.bullet", bg: UO.green, fg: .black) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
@@ -138,9 +139,8 @@ struct Viewer3DView: View {
 
             Spacer()
 
-            // STATUS jos
             if stage == .loading {
-                statusPill(text: loading360 ? "Se încarcă fundalul 360°..." : "Se încarcă modelul 3D...", spinning: true)
+                statusPill(text: loadingText, spinning: true)
             } else if stage == .failed {
                 statusPill(text: errorText ?? "Eroare la încărcare", spinning: false, color: UO.red)
             } else if loading360 {
@@ -185,11 +185,12 @@ struct Viewer3DView: View {
 }
 
 // ====================================================================
-//  CONTAINERUL RealityKit (cameră virtuală, fără sesiune AR)
+//  CONTAINERUL RealityKit
 // ====================================================================
 struct Viewer3DContainer: UIViewRepresentable {
     let experience: Experience
     @Binding var stage: Viewer3DView.ViewerStage
+    @Binding var loadingText: String
     @Binding var errorText: String?
     @Binding var show360: Bool
     @Binding var loading360: Bool
@@ -202,7 +203,7 @@ struct Viewer3DContainer: UIViewRepresentable {
         context.coordinator.arView = arView
         context.coordinator.setupCameraAndGestures()
 
-        Task { await context.coordinator.loadModel() }
+        Task { await context.coordinator.loadModels() }
         return arView
     }
 
@@ -220,8 +221,11 @@ struct Viewer3DContainer: UIViewRepresentable {
 
         private var worldAnchor: AnchorEntity?
         private var cameraEntity: PerspectiveCamera?
-        private var modelContainer: Entity?
-        private var labelGroups: [Entity] = []
+
+        /// pivot = ce rotește/scalează userul (toată scena, unitar)
+        private var pivot: Entity?
+        /// (eticheta, yaw-ul propriu al modelului) — pt. contra-rotație
+        private var labelGroups: [(label: Entity, yaw: Float)] = []
         private var annotationEntities: [ObjectIdentifier: Annotation] = [:]
 
         private var rotY: Float = 0
@@ -266,53 +270,138 @@ struct Viewer3DContainer: UIViewRepresentable {
         private func updateCamera() {
             guard let cam = cameraEntity else { return }
             cam.look(at: SIMD3<Float>(0, 0, 0),
-                     from: SIMD3<Float>(0, camHeight, 0.85),
+                     from: SIMD3<Float>(0, camHeight, 0.9),
                      relativeTo: nil)
         }
 
-        // MARK: Încărcarea modelului (același pipeline ca în AR)
-        func loadModel() async {
-            guard let glbURLString = parent.experience.primaryModelURL else {
-                parent.errorText = "Nu există model 3D"
+        // ============================================================
+        //  ÎNCĂRCAREA TUTUROR MODELELOR
+        //  Fiecare model primește transformările din editor; adnotările
+        //  se atașează pe modelul lor (modelId) -> layout identic cu web.
+        // ============================================================
+        private struct ModelSpec {
+            let id: String
+            let url: String
+            let position: SIMD3<Float>
+            let scale: SIMD3<Float>
+            let rotation: SIMD3<Float> // euler XYZ (radiani), ca în three.js
+        }
+
+        func loadModels() async {
+            // 1) Construim lista de modele (format nou) sau fallback legacy
+            var specs: [ModelSpec] = []
+
+            if let models = parent.experience.models, !models.isEmpty {
+                for m in models {
+                    guard (m.visible ?? true), let u = m.url, !u.isEmpty else { continue }
+                    specs.append(ModelSpec(
+                        id: m.id,
+                        url: u,
+                        position: vec3(m.position, fallback: SIMD3<Float>(0, 0, 0)),
+                        scale: vec3(m.scale, fallback: SIMD3<Float>(1, 1, 1)),
+                        rotation: vec3(m.rotation, fallback: SIMD3<Float>(0, 0, 0))
+                    ))
+                }
+            } else if let u = parent.experience.model_url, !u.isEmpty {
+                specs.append(ModelSpec(
+                    id: "__legacy__", url: u,
+                    position: SIMD3<Float>(0, 0, 0),
+                    scale: SIMD3<Float>(1, 1, 1),
+                    rotation: SIMD3<Float>(0, 0, 0)
+                ))
+            }
+
+            guard !specs.isEmpty else {
+                parent.errorText = "Nu există modele 3D"
                 parent.stage = .failed
                 return
             }
-            do {
-                let localURL = try await ARModelDownloader.shared.downloadModel(from: glbURLString)
-                let asset = try GLTFAsset(url: localURL)
-                let sceneSource = GLTFSCNSceneSource(asset: asset)
-                guard let scnScene = sceneSource.defaultScene else {
-                    parent.errorText = "Scenă GLB goală"
-                    parent.stage = .failed
-                    return
+
+            // 2) Pivot (gesturi) + sceneRoot (normalizare)
+            let pivotEntity = Entity()
+            worldAnchor?.addChild(pivotEntity)
+            pivot = pivotEntity
+
+            let sceneRoot = Entity()
+            pivotEntity.addChild(sceneRoot)
+
+            // 3) Descărcăm și plasăm fiecare model cu transformările lui
+            var loaded: [(container: Entity, spec: ModelSpec)] = []
+
+            for (idx, spec) in specs.enumerated() {
+                parent.loadingText = "Se încarcă modelul \(idx + 1)/\(specs.count)..."
+                do {
+                    let localURL = try await ARModelDownloader.shared.downloadModel(from: spec.url)
+                    let asset = try GLTFAsset(url: localURL)
+                    let sceneSource = GLTFSCNSceneSource(asset: asset)
+                    guard let scnScene = sceneSource.defaultScene else { continue }
+                    let rawModel = try await convertToRealityKit(scnScene: scnScene)
+
+                    // IMPORTANT: NU centram modelul — pivotul lui rămâne
+                    // originea GLB-ului, exact ca în editorul web. Altfel
+                    // pozițiile/adnotările din editor n-ar mai corespunde.
+                    let container = Entity()
+                    container.position = spec.position
+                    container.scale = spec.scale
+                    container.orientation = quatFromEulerXYZ(spec.rotation)
+                    container.addChild(rawModel)
+
+                    sceneRoot.addChild(container)
+                    loaded.append((container, spec))
+                } catch {
+                    print("🔴 DROP model \(spec.id): \(error)")
                 }
-                let rawModel = try await convertToRealityKit(scnScene: scnScene)
-
-                let bounds = rawModel.visualBounds(relativeTo: nil)
-                let center = bounds.center
-                let maxDim = max(bounds.extents.x, max(bounds.extents.y, bounds.extents.z))
-                let normalizeScale = maxDim > 0 ? (Float(0.42) / maxDim) : 1.0
-
-                // Aceeași ierarhie ca în AR: inner (centrat) + container (transform)
-                let innerEntity = Entity()
-                rawModel.position = SIMD3<Float>(-center.x, -center.y, -center.z)
-                innerEntity.addChild(rawModel)
-
-                let container = Entity()
-                container.addChild(innerEntity)
-                addAnnotations(to: container)
-
-                currentScale = normalizeScale
-                baseScale = normalizeScale
-                modelContainer = container
-                applyTransform()
-
-                worldAnchor?.addChild(container)
-                parent.stage = .ready
-            } catch {
-                parent.errorText = error.localizedDescription
-                parent.stage = .failed
             }
+
+            guard !loaded.isEmpty else {
+                parent.errorText = "Niciun model nu a putut fi încărcat"
+                parent.stage = .failed
+                return
+            }
+
+            // 4) Normalizăm TOATĂ scena (păstrând layout-ul relativ):
+            //    o aducem la ~0.5m și o centrăm în fața camerei
+            let bounds = sceneRoot.visualBounds(relativeTo: nil)
+            let maxDim = max(bounds.extents.x, max(bounds.extents.y, bounds.extents.z))
+            let s: Float = maxDim > 0 ? (0.5 / maxDim) : 1.0
+            let c = bounds.center
+            sceneRoot.scale = SIMD3<Float>(repeating: s)
+            sceneRoot.position = SIMD3<Float>(-c.x * s, -c.y * s, -c.z * s)
+
+            // 5) Adnotările — FIECARE pe modelul ei (după modelId)
+            let anns = parent.experience.annotations ?? []
+            let loadedIds = Set(loaded.map { $0.spec.id })
+
+            for (container, spec) in loaded {
+                let mine = anns.filter { $0.modelId == spec.id }
+                addAnnotations(mine, to: container, ownerYaw: spec.rotation.y)
+            }
+            // Adnotări orfane (lecții vechi fără modelId sau modele care n-au
+            // putut fi încărcate) -> le punem pe primul model
+            let orphans = anns.filter { a in
+                guard let mid = a.modelId else { return true }
+                return !loadedIds.contains(mid)
+            }
+            if let first = loaded.first {
+                addAnnotations(orphans, to: first.container, ownerYaw: first.spec.rotation.y)
+            }
+
+            applyTransform()
+            parent.stage = .ready
+        }
+
+        // Euler XYZ (three.js) -> quaternion
+        private func quatFromEulerXYZ(_ e: SIMD3<Float>) -> simd_quatf {
+            let qx = simd_quatf(angle: e.x, axis: SIMD3<Float>(1, 0, 0))
+            let qy = simd_quatf(angle: e.y, axis: SIMD3<Float>(0, 1, 0))
+            let qz = simd_quatf(angle: e.z, axis: SIMD3<Float>(0, 0, 1))
+            return qx * qy * qz
+        }
+
+        private func vec3(_ arr: [Float]?, fallback: SIMD3<Float>) -> SIMD3<Float> {
+            guard let a = arr, a.count >= 3,
+                  a[0].isFinite, a[1].isFinite, a[2].isFinite else { return fallback }
+            return SIMD3<Float>(a[0], a[1], a[2])
         }
 
         private func convertToRealityKit(scnScene: SCNScene) async throws -> ModelEntity {
@@ -325,10 +414,8 @@ struct Viewer3DContainer: UIViewRepresentable {
             return entity
         }
 
-        // MARK: Pini de adnotare (stilul din AR, adaptat)
-        private func addAnnotations(to parentEntity: Entity) {
-            guard let annotations = parent.experience.annotations else { return }
-
+        // MARK: Pini de adnotare (pe modelul lor, în coordonate locale)
+        private func addAnnotations(_ annotations: [Annotation], to parentEntity: Entity, ownerYaw: Float) {
             for ann in annotations {
                 let pos = ann.position3D
                 let lineHeight: Float = 0.11
@@ -396,7 +483,7 @@ struct Viewer3DContainer: UIViewRepresentable {
                 container.addChild(labelGroup)
                 parentEntity.addChild(container)
 
-                labelGroups.append(labelGroup)
+                labelGroups.append((labelGroup, ownerYaw))
                 annotationEntities[ObjectIdentifier(bg)] = ann
                 annotationEntities[ObjectIdentifier(border)] = ann
                 annotationEntities[ObjectIdentifier(textEntity)] = ann
@@ -406,7 +493,7 @@ struct Viewer3DContainer: UIViewRepresentable {
 
         // MARK: Gesturi
         @objc func handlePan(_ sender: UIPanGestureRecognizer) {
-            guard modelContainer != nil else { return }
+            guard pivot != nil else { return }
             let tr = sender.translation(in: sender.view)
             if sender.state == .began {
                 baseRotY = rotY
@@ -414,17 +501,17 @@ struct Viewer3DContainer: UIViewRepresentable {
             }
             if sender.state == .changed || sender.state == .ended {
                 rotY = baseRotY + Float(tr.x) * 0.012
-                camHeight = min(max(baseCamHeight - Float(tr.y) * 0.0022, -0.15), 0.85)
+                camHeight = min(max(baseCamHeight - Float(tr.y) * 0.0022, -0.2), 0.9)
                 applyTransform()
                 updateCamera()
             }
         }
 
         @objc func handlePinch(_ sender: UIPinchGestureRecognizer) {
-            guard modelContainer != nil else { return }
+            guard pivot != nil else { return }
             if sender.state == .began { baseScale = currentScale }
             if sender.state == .changed || sender.state == .ended {
-                currentScale = min(max(baseScale * Float(sender.scale), baseScale * 0.001 + 0.02), 6.0)
+                currentScale = min(max(baseScale * Float(sender.scale), 0.15), 8.0)
                 applyTransform()
             }
         }
@@ -447,12 +534,14 @@ struct Viewer3DContainer: UIViewRepresentable {
         }
 
         private func applyTransform() {
-            guard let c = modelContainer else { return }
-            c.transform.scale = SIMD3<Float>(repeating: currentScale)
-            c.transform.rotation = simd_quatf(angle: rotY, axis: SIMD3<Float>(0, 1, 0))
-            // Etichetele anulează rotația ca să rămână cu fața la cameră
-            let counter = simd_quatf(angle: -rotY, axis: SIMD3<Float>(0, 1, 0))
-            for label in labelGroups { label.orientation = counter }
+            guard let p = pivot else { return }
+            p.transform.scale = SIMD3<Float>(repeating: currentScale)
+            p.transform.rotation = simd_quatf(angle: rotY, axis: SIMD3<Float>(0, 1, 0))
+            // Etichetele anulează rotația scenei + rotația proprie a modelului,
+            // ca să rămână mereu cu fața spre cameră
+            for (label, yaw) in labelGroups {
+                label.orientation = simd_quatf(angle: -(rotY + yaw), axis: SIMD3<Float>(0, 1, 0))
+            }
         }
 
         // Helper SINCRON: TextureResource.load e marcat "noasync" în Swift 6,
@@ -474,7 +563,6 @@ struct Viewer3DContainer: UIViewRepresentable {
                 return
             }
 
-            // Avem deja sfera construită -> doar o reatașăm
             if let sphere = sphere360 {
                 worldAnchor?.addChild(sphere)
                 return
@@ -485,7 +573,6 @@ struct Viewer3DContainer: UIViewRepresentable {
 
             Task { @MainActor in
                 do {
-                    // Descărcăm imaginea equirectangulară local
                     let (tempURL, _) = try await URLSession.shared.download(from: url)
                     let localURL = FileManager.default.temporaryDirectory
                         .appendingPathComponent("bg360_\(UUID().uuidString).jpg")
@@ -498,7 +585,7 @@ struct Viewer3DContainer: UIViewRepresentable {
 
                     let sphereMesh = MeshResource.generateSphere(radius: 18)
                     let sphere = ModelEntity(mesh: sphereMesh, materials: [mat])
-                    sphere.scale = SIMD3<Float>(-1, 1, 1) // inversăm normalele: textura se vede din interior
+                    sphere.scale = SIMD3<Float>(-1, 1, 1) // textura se vede din interior
 
                     self.sphere360 = sphere
                     if self.is360Visible { self.worldAnchor?.addChild(sphere) }

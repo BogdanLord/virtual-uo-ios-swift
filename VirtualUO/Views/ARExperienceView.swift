@@ -560,7 +560,8 @@ struct ARViewContainer: UIViewRepresentable {
         func addAnnotations(to parentEntity: Entity) {
             guard let annotations = parent.experience.annotations else { return }
 
-            for ann in annotations {
+            let primaryId = parent.experience.models?.first(where: { ($0.visible ?? true) && ($0.url?.isEmpty == false) })?.id
+for ann in annotations where ann.modelId == nil || ann.modelId == primaryId {
                 let pos = ann.position3D
                 let lineHeight: Float = 0.13
 
