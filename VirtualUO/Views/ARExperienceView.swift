@@ -130,6 +130,7 @@ struct ARExperienceView: View {
     private var sheetLayer: some View {
         if let ann = selectedAnnotation {
             AnnotationSheet(annotation: ann) {
+                AudioService.shared.stop()
                 TTSService.shared.stop()
                 selectedAnnotation = nil
             }
@@ -506,7 +507,7 @@ struct ARViewContainer: UIViewRepresentable {
 
         @MainActor
         func loadGLBModel(anchorEntity: AnchorEntity) async {
-            guard let glbURLString = parent.experience.model_url else {
+            guard let glbURLString = parent.experience.primaryModelURL else {
                 parent.errorText = "Nu exista model GLB"
                 parent.stage = .failed
                 return
