@@ -279,7 +279,7 @@ struct Viewer3DContainer: UIViewRepresentable {
             }
             do {
                 let localURL = try await ARModelDownloader.shared.downloadModel(from: glbURLString)
-                let asset = try await GLTFAsset(url: localURL)
+                let asset = try GLTFAsset(url: localURL)
                 let sceneSource = GLTFSCNSceneSource(asset: asset)
                 guard let scnScene = sceneSource.defaultScene else {
                     parent.errorText = "Scenă GLB goală"
@@ -455,6 +455,12 @@ struct Viewer3DContainer: UIViewRepresentable {
             for label in labelGroups { label.orientation = counter }
         }
 
+        // Helper SINCRON: TextureResource.load e marcat "noasync" în Swift 6,
+        // deci îl apelăm dintr-o funcție sincronă, nu direct din context async.
+        nonisolated private static func loadTextureSync(_ url: URL) throws -> TextureResource {
+            try TextureResource.load(contentsOf: url)
+        }
+
         // MARK: Fundal 360° (sferă inversată texturată) — pornit DOAR manual
         func set360(enabled: Bool) {
             guard enabled != is360Visible else { return }
@@ -486,7 +492,7 @@ struct Viewer3DContainer: UIViewRepresentable {
                     try? FileManager.default.removeItem(at: localURL)
                     try FileManager.default.moveItem(at: tempURL, to: localURL)
 
-                    let texture = try TextureResource.load(contentsOf: localURL)
+                    let texture = try Self.loadTextureSync(localURL)
                     var mat = UnlitMaterial()
                     mat.color = .init(tint: .white, texture: .init(texture))
 

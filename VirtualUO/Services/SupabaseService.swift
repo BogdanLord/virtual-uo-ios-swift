@@ -57,10 +57,13 @@ class SupabaseService {
         let endpoint = "\(SupabaseService.baseURL)/rest/v1/rpc/increment_completion"
         guard let url = URL(string: endpoint) else { return }
 
+        // AuthService e izolat pe MainActor -> citim token-ul cu await
+        let token = await AuthService.shared.accessToken ?? SupabaseService.anonKey
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.addValue(SupabaseService.anonKey, forHTTPHeaderField: "apikey")
-        request.addValue("Bearer \(AuthService.shared.accessToken ?? SupabaseService.anonKey)", forHTTPHeaderField: "Authorization")
+        request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["exp_id": experienceId])
 
