@@ -38,25 +38,29 @@ struct ExperienceDetailView: View {
     // MARK: - Hero cu thumbnail
     private var heroSection: some View {
         ZStack(alignment: .bottomLeading) {
-            Group {
-                if let thumb = experience.thumbnail_url, let url = URL(string: thumb) {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let img): img.resizable().scaledToFill()
-                        default: heroPlaceholder
+            // Color.clear + overlay: imaginea hero nu mai depășește marginile
+            Color.clear
+                .frame(height: 230)
+                .frame(maxWidth: .infinity)
+                .overlay(
+                    Group {
+                        if let thumb = experience.thumbnail_url, let url = URL(string: thumb) {
+                            AsyncImage(url: url) { phase in
+                                switch phase {
+                                case .success(let img): img.resizable().scaledToFill()
+                                default: heroPlaceholder
+                                }
+                            }
+                        } else {
+                            heroPlaceholder
                         }
                     }
-                } else {
-                    heroPlaceholder
-                }
-            }
-            .frame(height: 230)
-            .frame(maxWidth: .infinity)
-            .clipped()
-            .overlay(
-                LinearGradient(colors: [.clear, UO.bgBottom.opacity(0.92)],
-                               startPoint: .center, endPoint: .bottom)
-            )
+                )
+                .clipped()
+                .overlay(
+                    LinearGradient(colors: [.clear, UO.bgBottom.opacity(0.92)],
+                                   startPoint: .center, endPoint: .bottom)
+                )
 
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 6) {

@@ -57,6 +57,7 @@ struct ARExperienceView: View {
         .onDisappear {
             AppDelegate.orientationLock = .all
             TTSService.shared.stop()
+            AudioService.shared.stop()
         }
     }
 
@@ -130,8 +131,8 @@ struct ARExperienceView: View {
     private var sheetLayer: some View {
         if let ann = selectedAnnotation {
             AnnotationSheet(annotation: ann) {
-                AudioService.shared.stop()
                 TTSService.shared.stop()
+                AudioService.shared.stop()
                 selectedAnnotation = nil
             }
         }
@@ -164,6 +165,7 @@ struct ARExperienceView: View {
     private var closeButton: some View {
         Button {
             TTSService.shared.stop()
+            AudioService.shared.stop()
             dismiss()
         } label: {
             HStack(spacing: 6) {
@@ -255,7 +257,7 @@ struct ARExperienceView: View {
     private var statusText: String {
         switch stage {
         case .scanning: return "Misca telefonul ca sa scanezi podeaua"
-        case .readyToPlace: return "Atinge ecranul ca sa plasezi modelul"
+        case .readyToPlace: return "Atinge ecranul ca sa plasezi lectia"
         case .downloading: return "Se incarca... \(statusDetail)"
         case .placed:
             if localizationTaskActive != nil {
@@ -271,30 +273,25 @@ struct ARExperienceView: View {
     private func startTask(_ task: TaskKind) {
         selectedAnnotation = nil
         if case .localization(let locTask) = task {
-            // Pentru localizare: nu aratam card, asteptam tap pe adnotare
             localizationTaskActive = locTask
             activeTask = nil
         } else {
-            // Identificare / quiz: aratam card
             localizationTaskActive = nil
             activeTask = task
         }
     }
 
     private func handleAnnotationTap(_ ann: Annotation) {
-        // Daca e activ un task de localizare, verificam
         if let locTask = localizationTaskActive {
             let success = (ann.id == locTask.annotationId)
             completeTask(.localization(locTask), success: success)
             localizationTaskActive = nil
             return
         }
-        // Altfel, deschidem adnotarea normal
         selectedAnnotation = ann
     }
 
     private func completeTask(_ task: TaskKind, success: Bool) {
-        // Salvam progresul
         ProgressService.shared.setStatus(
             success ? .success : .failed,
             taskId: task.id,
@@ -302,14 +299,11 @@ struct ARExperienceView: View {
         )
         progress = ProgressService.shared.getProgress(experienceId: experience.id)
 
-        // Haptic
         let gen = UINotificationFeedbackGenerator()
         gen.notificationOccurred(success ? .success : .error)
 
-        // Inchide card
         activeTask = nil
 
-        // Arata feedback
         feedback = (success, success ? "Corect!" : "Gresit!")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
             feedback = nil
@@ -478,14 +472,14 @@ struct ARViewContainer: UIViewRepresentable {
             arView.scene.addAnchor(anchorEntity)
 
             DispatchQueue.main.async { self.parent.stage = .downloading }
-            Task { await self.loadGLBModel(anchorEntity: anchorEntity) }
+            Task { await self.loadAllModels(anchorEntity: anchorEntity) }
         }
 
         @objc func handlePinch(_ sender: UIPinchGestureRecognizer) {
             guard transformEntity != nil else { return }
             if sender.state == .began { baseScale = currentScale }
             if sender.state == .changed || sender.state == .ended {
-                currentScale = min(max(baseScale * Float(sender.scale), 0.2), 5.0)
+                currentScale = min(max(baseScale * Float(sender.scale), 0.05), 5.0)
                 applyTransform()
             }
         }
@@ -505,63 +499,140 @@ struct ARViewContainer: UIViewRepresentable {
             e.transform.rotation = simd_quatf(angle: currentRotationY, axis: SIMD3<Float>(0, 1, 0))
         }
 
+        // ============================================================
+        //  ÎNCARCĂ TOATE MODELELE LECȚIEI (multi-model)
+        //  Fiecare model primește poziția/scara/rotația din editorul web,
+        //  adnotările se pun pe modelul lor (modelId), iar întreaga
+        //  compoziție e așezată pe podea ca un singur obiect AR.
+        // ============================================================
+        private struct ModelSpec {
+            let id: String
+            let url: String
+            let position: SIMD3<Float>
+            let scale: SIMD3<Float>
+            let rotation: SIMD3<Float> // euler XYZ (radiani), ca în three.js
+        }
+
         @MainActor
-        func loadGLBModel(anchorEntity: AnchorEntity) async {
-            guard let glbURLString = parent.experience.primaryModelURL else {
-                parent.errorText = "Nu exista model GLB"
+        func loadAllModels(anchorEntity: AnchorEntity) async {
+            // 1) Lista de modele: formatul nou (models[]) sau legacy (model_url)
+            var specs: [ModelSpec] = []
+
+            if let models = parent.experience.models, !models.isEmpty {
+                for m in models {
+                    guard (m.visible ?? true), let u = m.url, !u.isEmpty else { continue }
+                    specs.append(ModelSpec(
+                        id: m.id,
+                        url: u,
+                        position: vec3(m.position, fallback: SIMD3<Float>(0, 0, 0)),
+                        scale: vec3(m.scale, fallback: SIMD3<Float>(1, 1, 1)),
+                        rotation: vec3(m.rotation, fallback: SIMD3<Float>(0, 0, 0))
+                    ))
+                }
+            } else if let u = parent.experience.model_url, !u.isEmpty {
+                specs.append(ModelSpec(
+                    id: "__legacy__", url: u,
+                    position: SIMD3<Float>(0, 0, 0),
+                    scale: SIMD3<Float>(1, 1, 1),
+                    rotation: SIMD3<Float>(0, 0, 0)
+                ))
+            }
+
+            guard !specs.isEmpty else {
+                parent.errorText = "Nu exista modele 3D"
                 parent.stage = .failed
                 return
             }
-            do {
-                parent.statusDetail = "descarcare..."
-                let localURL = try await ARModelDownloader.shared.downloadModel(from: glbURLString)
-                parent.statusDetail = "procesare..."
-                let asset = try await GLTFAsset(url: localURL)
-                let sceneSource = GLTFSCNSceneSource(asset: asset)
-                guard let scnScene = sceneSource.defaultScene else {
-                    parent.errorText = "Scena GLB goala"
-                    parent.stage = .failed
-                    return
+
+            // 2) Construim scena: fiecare model cu transformările lui
+            let sceneRoot = Entity()
+            var loaded: [(container: Entity, spec: ModelSpec)] = []
+
+            for (idx, spec) in specs.enumerated() {
+                parent.statusDetail = "model \(idx + 1)/\(specs.count)"
+                do {
+                    let localURL = try await ARModelDownloader.shared.downloadModel(from: spec.url)
+                    let asset = try GLTFAsset(url: localURL)
+                    let sceneSource = GLTFSCNSceneSource(asset: asset)
+                    guard let scnScene = sceneSource.defaultScene else { continue }
+                    let rawModel = try await convertToRealityKit(scnScene: scnScene)
+
+                    // NU centram modelul individual: pivotul rămâne originea
+                    // GLB-ului, exact ca în editorul web, altfel layout-ul
+                    // și adnotările s-ar deplasa.
+                    let container = Entity()
+                    container.position = spec.position
+                    container.scale = spec.scale
+                    container.orientation = quatFromEulerXYZ(spec.rotation)
+                    container.addChild(rawModel)
+
+                    sceneRoot.addChild(container)
+                    loaded.append((container, spec))
+                } catch {
+                    print("🔴 DROP model \(spec.id): \(error)")
                 }
-                let rawModel = try await convertToRealityKit(scnScene: scnScene)
-
-                let bounds = rawModel.visualBounds(relativeTo: nil)
-                let center = bounds.center
-                let maxDim = max(bounds.extents.x, max(bounds.extents.y, bounds.extents.z))
-                let normalizeScale = maxDim > 0 ? (Float(0.3) / maxDim) : 1.0
-
-                let innerEntity = Entity()
-                rawModel.position = SIMD3<Float>(-center.x, -center.y, -center.z)
-                innerEntity.addChild(rawModel)
-
-                let transformEntity = Entity()
-                transformEntity.addChild(innerEntity)
-
-                addAnnotations(to: transformEntity)
-
-                let modelHeight = bounds.extents.y * normalizeScale
-                let baseEntity = Entity()
-                baseEntity.position = SIMD3<Float>(0, modelHeight / 2.0, 0)
-                baseEntity.addChild(transformEntity)
-
-                self.transformEntity = transformEntity
-                self.currentScale = normalizeScale
-                self.baseScale = normalizeScale
-                applyTransform()
-
-                anchorEntity.addChild(baseEntity)
-                parent.stage = .placed
-            } catch {
-                parent.errorText = error.localizedDescription
-                parent.stage = .failed
             }
+
+            guard !loaded.isEmpty else {
+                parent.errorText = "Niciun model nu a putut fi incarcat"
+                parent.stage = .failed
+                return
+            }
+
+            // 3) Normalizăm TOATĂ compoziția și o așezăm pe podea:
+            //    centrată pe X/Z, cu baza (min.y) exact pe planul detectat
+            let bounds = sceneRoot.visualBounds(relativeTo: nil)
+            let maxDim = max(bounds.extents.x, max(bounds.extents.y, bounds.extents.z))
+            let normalizeScale = maxDim > 0 ? (Float(0.4) / maxDim) : 1.0
+            let c = bounds.center
+            sceneRoot.position = SIMD3<Float>(-c.x, -bounds.min.y, -c.z)
+
+            // 4) Adnotările — FIECARE pe modelul ei (după modelId)
+            let anns = parent.experience.annotations ?? []
+            let loadedIds = Set(loaded.map { $0.spec.id })
+
+            for (container, spec) in loaded {
+                addAnnotations(anns.filter { $0.modelId == spec.id }, to: container)
+            }
+            // Adnotări orfane (lecții vechi fără modelId / modele care au picat)
+            let orphans = anns.filter { a in
+                guard let mid = a.modelId else { return true }
+                return !loadedIds.contains(mid)
+            }
+            if let first = loaded.first {
+                addAnnotations(orphans, to: first.container)
+            }
+
+            // 5) Pivotul pentru gesturi (pinch + rotație) ține toată scena
+            let transformEntity = Entity()
+            transformEntity.addChild(sceneRoot)
+
+            self.transformEntity = transformEntity
+            self.currentScale = normalizeScale
+            self.baseScale = normalizeScale
+            applyTransform()
+
+            anchorEntity.addChild(transformEntity)
+            parent.stage = .placed
         }
 
-        func addAnnotations(to parentEntity: Entity) {
-            guard let annotations = parent.experience.annotations else { return }
+        // Euler XYZ (three.js) -> quaternion
+        private func quatFromEulerXYZ(_ e: SIMD3<Float>) -> simd_quatf {
+            let qx = simd_quatf(angle: e.x, axis: SIMD3<Float>(1, 0, 0))
+            let qy = simd_quatf(angle: e.y, axis: SIMD3<Float>(0, 1, 0))
+            let qz = simd_quatf(angle: e.z, axis: SIMD3<Float>(0, 0, 1))
+            return qx * qy * qz
+        }
 
-            let primaryId = parent.experience.models?.first(where: { ($0.visible ?? true) && ($0.url?.isEmpty == false) })?.id
-for ann in annotations where ann.modelId == nil || ann.modelId == primaryId {
+        private func vec3(_ arr: [Float]?, fallback: SIMD3<Float>) -> SIMD3<Float> {
+            guard let a = arr, a.count >= 3,
+                  a[0].isFinite, a[1].isFinite, a[2].isFinite else { return fallback }
+            return SIMD3<Float>(a[0], a[1], a[2])
+        }
+
+        // MARK: Pini de adnotare (atașați pe modelul lor)
+        func addAnnotations(_ annotations: [Annotation], to parentEntity: Entity) {
+            for ann in annotations {
                 let pos = ann.position3D
                 let lineHeight: Float = 0.13
 
@@ -572,7 +643,9 @@ for ann in annotations where ann.modelId == nil || ann.modelId == primaryId {
                 var dotMat = UnlitMaterial()
                 dotMat.color = .init(tint: UIColor(red: 0, green: 1, blue: 0.53, alpha: 1))
                 let dot = ModelEntity(mesh: dotMesh, materials: [dotMat])
+                dot.generateCollisionShapes(recursive: false)
                 container.addChild(dot)
+                annotationEntities[ObjectIdentifier(dot)] = ann
 
                 let haloMesh = MeshResource.generateSphere(radius: 0.011)
                 var haloMat = UnlitMaterial()
