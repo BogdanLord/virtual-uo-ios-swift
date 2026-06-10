@@ -257,7 +257,7 @@ struct ARExperienceView: View {
     private var statusText: String {
         switch stage {
         case .scanning: return "Misca telefonul ca sa scanezi podeaua"
-        case .readyToPlace: return "Atinge ecranul ca sa plasezi lectia"
+        case .readyToPlace: return "Tinteste cu + locul dorit, apoi atinge ecranul"
         case .downloading: return "Se incarca... \(statusDetail)"
         case .placed:
             if localizationTaskActive != nil {
@@ -353,6 +353,7 @@ struct ARViewContainer: UIViewRepresentable {
         rotation.delegate = context.coordinator
 
         context.coordinator.startUpdateLoop()
+        context.coordinator.setupReticle()
         return arView
     }
 
@@ -379,6 +380,10 @@ struct ARViewContainer: UIViewRepresentable {
         var displayLink: CADisplayLink?
         var pulseTime: Float = 0
 
+        // Reticulul "+" de pe podea (ținta de plasare din centrul ecranului)
+        var reticleEntity: Entity?
+        var lastReticleTransform: simd_float4x4?
+
         init(_ parent: ARViewContainer) {
             self.parent = parent
         }
@@ -393,8 +398,87 @@ struct ARViewContainer: UIViewRepresentable {
             displayLink?.add(to: .main, forMode: .common)
         }
 
+        // ============================================================
+        //  RETICULUL "+" — ținta de plasare de pe podea
+        //  Urmărește în timp real punctul din CENTRUL ecranului, iar
+        //  modelele se plasează EXACT acolo (nu unde atingi cu degetul).
+        // ============================================================
+        func setupReticle() {
+            guard let arView = arView, reticleEntity == nil else { return }
+
+            let accent = UIColor(red: 0, green: 1, blue: 0.53, alpha: 1)
+            let reticle = Entity()
+
+            // Cele două brațe ale "+"-ului, întinse pe podea
+            var armMat = UnlitMaterial()
+            armMat.color = .init(tint: accent)
+
+            let armX = ModelEntity(
+                mesh: .generateBox(size: SIMD3<Float>(0.16, 0.0012, 0.014), cornerRadius: 0.006),
+                materials: [armMat]
+            )
+            let armZ = ModelEntity(
+                mesh: .generateBox(size: SIMD3<Float>(0.014, 0.0012, 0.16), cornerRadius: 0.006),
+                materials: [armMat]
+            )
+            reticle.addChild(armX)
+            reticle.addChild(armZ)
+
+            // Punct central alb, luminos
+            var dotMat = UnlitMaterial()
+            dotMat.color = .init(tint: .white)
+            let dot = ModelEntity(mesh: .generateSphere(radius: 0.008), materials: [dotMat])
+            reticle.addChild(dot)
+
+            // 4 puncte de colț care sugerează zona de plasare
+            var cornerMat = UnlitMaterial()
+            cornerMat.color = .init(tint: accent.withAlphaComponent(0.55))
+            let d: Float = 0.11
+            for (x, z) in [(d, d), (d, -d), (-d, d), (-d, -d)] {
+                let corner = ModelEntity(mesh: .generateSphere(radius: 0.006), materials: [cornerMat])
+                corner.position = SIMD3<Float>(x, 0, z)
+                reticle.addChild(corner)
+            }
+
+            reticle.isEnabled = false
+            let anchor = AnchorEntity(world: .zero)
+            anchor.addChild(reticle)
+            arView.scene.addAnchor(anchor)
+            reticleEntity = reticle
+        }
+
+        private func updateReticle(_ arView: ARView) {
+            guard let reticle = reticleEntity else { return }
+
+            // După plasare (sau înainte să fie gata), reticulul stă ascuns
+            guard !modelPlaced, parent.stage == .readyToPlace else {
+                reticle.isEnabled = false
+                return
+            }
+
+            let center = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
+            let hit = arView.raycast(from: center, allowing: .existingPlaneGeometry, alignment: .horizontal).first
+                ?? arView.raycast(from: center, allowing: .estimatedPlane, alignment: .horizontal).first
+
+            if let hit = hit {
+                lastReticleTransform = hit.worldTransform
+                reticle.isEnabled = true
+                reticle.setTransformMatrix(hit.worldTransform, relativeTo: nil)
+                // Puls subtil, să atragă privirea
+                let s: Float = 1.0 + 0.07 * sin(pulseTime * 1.6)
+                reticle.scale = SIMD3<Float>(repeating: s)
+            } else {
+                lastReticleTransform = nil
+                reticle.isEnabled = false
+            }
+        }
+
         @objc func onFrame() {
             guard let arView = arView else { return }
+
+            // RETICULUL "+": urmărește podeaua din centrul ecranului
+            updateReticle(arView)
+
             let camPos = arView.cameraTransform.translation
             for label in billboardEntities {
                 let labelPos = label.position(relativeTo: nil)
@@ -454,19 +538,28 @@ struct ARViewContainer: UIViewRepresentable {
 
             guard parent.stage == .readyToPlace else { return }
 
-            let r1 = arView.raycast(from: loc, allowing: .existingPlaneGeometry, alignment: .horizontal)
-            let result = r1.first ?? arView.raycast(from: loc, allowing: .estimatedPlane, alignment: .horizontal).first
-
-            guard let res = result else {
-                DispatchQueue.main.async { self.parent.statusDetail = "indreapta spre podea" }
-                return
+            // PLASARE EXACTĂ: folosim poziția reticulului "+" (centrul
+            // ecranului), nu locul atins cu degetul. Înainte, raycast-ul
+            // pleca din punctul tap-ului — în landscape atingi cu degetul
+            // mare din dreapta, de-aia modelul apărea deplasat în dreapta.
+            let placementTransform: simd_float4x4
+            if let t = lastReticleTransform {
+                placementTransform = t
+            } else {
+                let r1 = arView.raycast(from: loc, allowing: .existingPlaneGeometry, alignment: .horizontal)
+                guard let res = r1.first ?? arView.raycast(from: loc, allowing: .estimatedPlane, alignment: .horizontal).first else {
+                    DispatchQueue.main.async { self.parent.statusDetail = "indreapta spre podea" }
+                    return
+                }
+                placementTransform = res.worldTransform
             }
 
             modelPlaced = true
+            reticleEntity?.isEnabled = false
             let gen = UIImpactFeedbackGenerator(style: .heavy)
             gen.impactOccurred()
 
-            let arAnchor = ARAnchor(name: "modelAnchor", transform: res.worldTransform)
+            let arAnchor = ARAnchor(name: "modelAnchor", transform: placementTransform)
             arView.session.add(anchor: arAnchor)
             let anchorEntity = AnchorEntity(anchor: arAnchor)
             arView.scene.addAnchor(anchorEntity)
